@@ -1,0 +1,10 @@
+# Training environment (modern machine / Colab / Linux / Win10+)
+# Models trained here are exported and loaded on Win7 for inference only.
+
+-r requirements-win7.txt
+
+# Extra training helpers (not required on Win7 runtime)
+matplotlib==3.5.3
+seaborn==0.11.2
+# Optional: if you want LightGBM on training machine only
+# lightgbm==3.3.5

@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+*.enc
+config.salt
+.pytest_cache/
+.coverage
+htmlcov/
+models/**/model.pkl
+*.log
+.idea/
+.vscode/
