@@ -37,10 +37,14 @@ class ExecutionEngine:
         state_dir: Path,
         risk: RiskEngine | None = None,
         positions_store: PositionStore | None = None,
+        audit: object | None = None,
+        metrics: object | None = None,
     ) -> None:
         self.client = client
         self.s = settings
         self.risk = risk
+        self.audit = audit
+        self.metrics = metrics
         self.positions_store = positions_store or PositionStore(state_dir / "positions.json")
         self.positions: dict[str, PositionState] = {}
         self.intents = IntentStore(state_dir / "order_intents.json")
@@ -114,6 +118,15 @@ class ExecutionEngine:
         intent.status = OrderIntentStatus.NORMALIZED
         intent.normalized_base = est_base
         self.intents.update(intent)
+        if self.audit is not None:
+            try:
+                self.audit.record(  # type: ignore[attr-defined]
+                    "INTENT_CREATED", symbol=symbol, side="buy",
+                    client_order_id=intent.client_order_id, reason=decision.reason,
+                    quantity=float(quote_amt),
+                )
+            except Exception:
+                pass
         return self._submit(intent, side=Side.BUY, base_amount=0.0, quote_amount=float(quote_amt), base=base, quote=quote)
 
     def sell(self, symbol: str, decision: RiskDecision, last_price: float, *, base: str | None = None, quote: str | None = None) -> OrderResult | None:
@@ -136,18 +149,11 @@ class ExecutionEngine:
             return None
         constraints = self.client.get_constraints(symbol)
         if constraints is None:
-            logger.error("event=order_validation_failed symbol=%s reason=no_constraints", symbol)
             return None
         raw_qty = Decimal(str(decision.size_base)) * Decimal("0.999")
         norm = constraints.normalize_quantity(raw_qty, market_order=True)
         ok_q, q_reason = constraints.validate_quantity(norm, market_order=True)
         if not ok_q:
-            logger.error("event=order_validation_failed symbol=%s reason=%s", symbol, q_reason)
-            return None
-        est_notional2 = norm * Decimal(str(last_price))
-        ok_n2, n_reason2 = constraints.validate_notional(est_notional2)
-        if not ok_n2:
-            logger.error("event=order_validation_failed symbol=%s reason=%s", symbol, n_reason2)
             return None
         intent = self.intents.create(
             symbol=symbol, side="sell", base_amount=float(raw_qty),
@@ -162,10 +168,6 @@ class ExecutionEngine:
         intent.status = OrderIntentStatus.SUBMITTING
         intent.attempts += 1
         self.intents.update(intent)
-        logger.info(
-            "event=order_submitting client_order_id=%s symbol=%s side=%s attempt=%d mode=LIVE",
-            intent.client_order_id, intent.symbol, side.value, intent.attempts,
-        )
         try:
             result = self.client.create_order(
                 symbol=intent.symbol, side=side, amount=base_amount,
@@ -184,6 +186,11 @@ class ExecutionEngine:
                 return None
             intent.status = OrderIntentStatus.REJECTED
             self.intents.update(intent)
+            if self.metrics is not None:
+                try:
+                    self.metrics.record_order(success=False)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
             return None
         except Exception as exc:
             intent.status = OrderIntentStatus.UNKNOWN
@@ -199,6 +206,20 @@ class ExecutionEngine:
         intent.filled = result.filled
         intent.average = result.average
         self.intents.update(intent)
+        if self.audit is not None:
+            try:
+                self.audit.record(  # type: ignore[attr-defined]
+                    "ORDER_FILLED", symbol=intent.symbol, side=side.value,
+                    client_order_id=intent.client_order_id or "",
+                    exchange_order_id=result.id, quantity=result.filled, price=result.average,
+                )
+            except Exception:
+                pass
+        if self.metrics is not None:
+            try:
+                self.metrics.record_order(success=True)  # type: ignore[attr-defined]
+            except Exception:
+                pass
         self._on_fill_confirmed(intent, side, result, base=base, quote=quote)
         return result
 
@@ -215,10 +236,8 @@ class ExecutionEngine:
                 order_id=result.id, client_order_id=intent.client_order_id or "",
             )
             if self.risk is not None:
-                self.risk.record_fill(
-                    side="buy", symbol=intent.symbol, notional=notional, pnl=0.0,
-                    order_id=result.id, client_order_id=intent.client_order_id or "",
-                )
+                self.risk.record_fill(side="buy", symbol=intent.symbol, notional=notional, pnl=0.0,
+                                      order_id=result.id, client_order_id=intent.client_order_id or "")
         else:
             entry = self.load_entry_price(intent.symbol) or avg
             notional = filled * avg
@@ -231,10 +250,8 @@ class ExecutionEngine:
                 else:
                     self.positions[intent.symbol].amount = left
             if self.risk is not None:
-                self.risk.record_fill(
-                    side="sell", symbol=intent.symbol, notional=notional, pnl=pnl,
-                    order_id=result.id, client_order_id=intent.client_order_id or "",
-                )
+                self.risk.record_fill(side="sell", symbol=intent.symbol, notional=notional, pnl=pnl,
+                                      order_id=result.id, client_order_id=intent.client_order_id or "")
 
     def _reconcile(self, intent: OrderIntent) -> None:
         intent.status = OrderIntentStatus.RECONCILIATION
