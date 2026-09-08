@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 class RiskDecision:
     approved: bool
     reason: str
-    size_quote: float  # amount in quote currency to spend (BUY) or 0
-    size_base: float  # amount in base to sell (SELL) or 0
+    size_quote: float
+    size_base: float
 
 
 class RiskEngine:
@@ -25,7 +25,6 @@ class RiskEngine:
         self.state_dir = state_dir
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._daily_pnl_pct = 0.0
-        self._open_positions = 0
 
     def kill_switch_active(self) -> bool:
         return (self.state_dir / "KILL").exists() or Path(self.s.kill_switch_file).exists()
@@ -45,13 +44,16 @@ class RiskEngine:
         free_quote: float,
         last_price: float,
         open_positions: int,
+        *,
+        quote_asset: str | None = None,
     ) -> RiskDecision:
         if self.kill_switch_active():
             return RiskDecision(False, "kill switch active", 0.0, 0.0)
-        if free_quote < self.s.min_quote_balance:
+        min_q = self.s.min_balance_for_quote(quote_asset or self.s.quote_asset)
+        if free_quote < min_q:
             return RiskDecision(
                 False,
-                f"quote balance {free_quote:.0f} < min {self.s.min_quote_balance:.0f}",
+                f"quote balance {free_quote:.8f} < min {min_q:.8f}",
                 0.0,
                 0.0,
             )
@@ -64,7 +66,7 @@ class RiskEngine:
 
         size_quote = free_quote * (self.s.max_position_pct / 100.0)
         size_quote = min(size_quote, free_quote * 0.95)
-        if size_quote < self.s.min_quote_balance * 0.5:
+        if size_quote < min_q * 0.5:
             return RiskDecision(False, "computed size too small", 0.0, 0.0)
 
         size_base = size_quote / last_price
