@@ -9,7 +9,7 @@ import sys
 from getpass import getpass
 
 from tko import __version__
-from tko.core.config import load_settings
+from tko.core.config import SettingsError, load_settings
 from tko.core.credentials import (
     CredentialError,
     CredentialNotFoundError,
@@ -62,8 +62,36 @@ def cmd_setup(_: argparse.Namespace) -> int:
 
 
 def cmd_run(_: argparse.Namespace) -> int:
-    settings = load_settings()
+    """Fail-closed startup barrier before any trading runtime.
+
+    Order (S2-10):
+      1. load + validate settings (bounds, LIVE gate)
+      2. validate credentials
+      3. acquire instance lock
+      4. construct TradingBot
+    """
+    try:
+        settings = load_settings()
+        settings.validate_for_live()
+    except SettingsError as exc:
+        print(f"CONFIG ERROR (fail-closed): {exc}")
+        return 1
+    except Exception as exc:
+        print(f"CONFIG ERROR (fail-closed): {exc}")
+        return 1
+
+    if settings.live_mode is not True:
+        print("LIVE GATE FAILED: live_mode must be True. Aborting.")
+        return 1
+
     _setup_logging(settings.log_level)
+
+    try:
+        load_tokocrypto()
+    except (CredentialNotFoundError, CredentialError) as exc:
+        print(f"CREDENTIAL ERROR (fail-closed): {exc}")
+        return 1
+
     from tko.runtime.instance_lock import InstanceLock, InstanceLockError
 
     lock = InstanceLock(state_dir() / "tko.lock")
@@ -82,11 +110,6 @@ def cmd_run(_: argparse.Namespace) -> int:
         signal.signal(signal.SIGTERM, _release_and_exit)
 
     try:
-        try:
-            load_tokocrypto()
-        except (CredentialNotFoundError, CredentialError) as exc:
-            print(exc)
-            return 1
         from tko.runtime.bot import TradingBot
 
         bot = TradingBot(settings, state_dir())
@@ -102,7 +125,11 @@ def cmd_run(_: argparse.Namespace) -> int:
 
 
 def cmd_status(_: argparse.Namespace) -> int:
-    settings = load_settings()
+    try:
+        settings = load_settings()
+    except SettingsError as exc:
+        print(f"CONFIG ERROR: {exc}")
+        return 1
     _setup_logging(settings.log_level)
     from tko.exchange.tokocrypto import TokocryptoClient
     from tko.runtime.metrics import MetricsStore
@@ -120,8 +147,10 @@ def cmd_status(_: argparse.Namespace) -> int:
         if b.total > 0:
             print(f"  {asset:8s} free={b.free:.8f}  used={b.used:.8f}  total={b.total:.8f}")
     m = MetricsStore(state_dir() / "metrics.json").snapshot()
-    print(f"\n=== Metrics ===\n  status={m.status} orders_today={m.orders_today} "
-          f"ok={m.orders_success} fail={m.orders_failed} pnl={m.daily_pnl:.4f}")
+    print(
+        f"\n=== Metrics ===\n  status={m.status} orders_today={m.orders_today} "
+        f"ok={m.orders_success} fail={m.orders_failed} pnl={m.daily_pnl:.4f}"
+    )
     client.close()
     return 0
 
