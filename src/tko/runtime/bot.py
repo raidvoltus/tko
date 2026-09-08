@@ -13,6 +13,8 @@ from tko.exchange.tokocrypto import TokocryptoClient
 from tko.execution.engine import ExecutionEngine
 from tko.notify.telegram import TelegramNotifier
 from tko.risk.engine import RiskEngine
+from tko.risk.pnl_tracker import DailyPnLTracker
+from tko.risk.position_store import PositionStore
 from tko.strategy.btc import BtcAnalyzer
 
 logger = logging.getLogger(__name__)
@@ -26,16 +28,47 @@ class TradingBot:
         self.state_dir = state_dir
         creds = load_tokocrypto()
         self.client = TokocryptoClient(creds)
-        self.risk = RiskEngine(settings, state_dir)
+        self.pnl = DailyPnLTracker(
+            state_dir / "pnl_ledger.jsonl",
+            timezone_name=settings.risk_timezone,
+        )
+        self.risk = RiskEngine(settings, state_dir, pnl_tracker=self.pnl)
+        self.positions_store = PositionStore(state_dir / "positions.json")
         self.strategy = BtcAnalyzer(settings)
-        self.execution = ExecutionEngine(self.client, settings, state_dir)
+        self.execution = ExecutionEngine(
+            self.client,
+            settings,
+            state_dir,
+            risk=self.risk,
+            positions_store=self.positions_store,
+        )
         self.notify = TelegramNotifier(load_telegram() if settings.telegram_enabled else None)
         self._running = False
 
     def start(self) -> None:
         self._running = True
         self.client.connect()
-        self.notify.send("TKO bot started — LIVE mode only (no paper/demo)")
+        try:
+            balances = self.client.fetch_balance()
+            free_map = {a: b.free for a, b in balances.items()}
+            notes = self.positions_store.reconcile_with_balances(
+                free_map, min_dust=self.s.min_base_dust, stable_like=STABLE_LIKE
+            )
+            self.execution._hydrate_positions_memory()
+            eq = 0.0
+            for q in self.s.quote_asset_list():
+                eq += float(free_map.get(q, 0.0))
+            self.risk.set_equity_baseline_if_empty(eq)
+            if notes:
+                logger.info("position reconcile notes=%s", notes)
+        except Exception as exc:
+            logger.warning("Startup balance/position reconcile failed: %s", exc)
+
+        day = self.pnl.stats_for_day()
+        self.notify.send(
+            f"TKO bot started — LIVE only\n"
+            f"day={day.day} pnl={day.realized_pnl:.4f} notional={day.notional_traded:.4f}"
+        )
         logger.info("Bot LIVE started — loop every %.0fs", self.s.loop_interval_sec)
         try:
             while self._running:
@@ -50,6 +83,11 @@ class TradingBot:
                     time.sleep(self.s.loop_interval_sec)
                     continue
                 try:
+                    breach = self.risk.check_daily_limits_or_kill()
+                    if breach:
+                        self.notify.send(f"TKO kill: {breach}")
+                        time.sleep(self.s.loop_interval_sec)
+                        continue
                     self.execution.reconcile_pending()
                     self._tick()
                 except Exception as exc:
@@ -103,17 +141,17 @@ class TradingBot:
                 symbol, timeframe=self.s.ohlcv_timeframe, limit=self.s.ohlcv_limit
             )
             decision = self.strategy.analyze(candles)
-            pos = self.execution.positions.get(symbol)
-            entry = pos.entry_price if pos else None
+            entry = self.execution.load_entry_price(symbol)
             sell_dec = self.risk.evaluate_sell(
                 free_base=free_base,
                 entry_price=entry,
                 last_price=ticker.last,
                 signal_sell=(decision.signal == Signal.SELL),
+                estimated_notional=free_base * ticker.last,
             )
             logger.info(
-                "position %s free=%.8f last=%.4f signal=%s sell_approved=%s (%s)",
-                symbol, free_base, ticker.last, decision.signal.value,
+                "position %s free=%.8f last=%.4f entry=%s signal=%s sell_approved=%s (%s)",
+                symbol, free_base, ticker.last, entry, decision.signal.value,
                 sell_dec.approved, sell_dec.reason,
             )
             if sell_dec.approved:
