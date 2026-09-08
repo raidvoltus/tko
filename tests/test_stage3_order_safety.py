@@ -1,4 +1,4 @@
-"""Stage 3 final gate: no duplicate POST, recon fail-closed, single authority."""
+"""Stage 3 final gate: no duplicate POST, recon fail-closed, single authority, INV-18."""
 
 from __future__ import annotations
 
@@ -265,3 +265,106 @@ def test_legacy_manual_review_maps_to_governor(tmp_path: Path):
     assert loaded is not None
     assert loaded.status == OrderIntentStatus.GOVERNOR_AUTONOMOUS
     assert store2.has_blocking_intent("X/IDR", "buy")
+
+
+def test_adapter_all_fetchers_fail_query_failed():
+    """INV-18: all CCXT fetchers failing → QUERY_FAILED, not NOT_FOUND."""
+    from tko.core.credentials import TokocryptoCredentials
+    from tko.core.types import SecretStr
+    from tko.exchange.order_response import OrderLookupStatus
+
+    client = TokocryptoClient(
+        TokocryptoCredentials(SecretStr("valid_api_key_xxxxx"), SecretStr("valid_api_secret_yyyy"))
+    )
+    mock_ccxt = MagicMock()
+    mock_ccxt.fetch_open_orders.side_effect = TimeoutError("open timeout")
+    mock_ccxt.fetch_closed_orders.side_effect = TimeoutError("closed timeout")
+    mock_ccxt.fetch_orders.side_effect = TimeoutError("orders timeout")
+    client._client = mock_ccxt
+
+    result = client.find_order_by_client_id("BTC/IDR", "CID-1")
+    assert result.status == OrderLookupStatus.QUERY_FAILED
+    assert result.order is None
+    assert result.error
+
+
+def test_adapter_successful_empty_lists_not_found():
+    """Successful empty responses → NOT_FOUND (definitive absence)."""
+    from tko.core.credentials import TokocryptoCredentials
+    from tko.core.types import SecretStr
+    from tko.exchange.order_response import OrderLookupStatus
+
+    client = TokocryptoClient(
+        TokocryptoCredentials(SecretStr("valid_api_key_xxxxx"), SecretStr("valid_api_secret_yyyy"))
+    )
+    mock_ccxt = MagicMock()
+    mock_ccxt.fetch_open_orders.return_value = []
+    mock_ccxt.fetch_closed_orders.return_value = []
+    mock_ccxt.fetch_orders.return_value = []
+    client._client = mock_ccxt
+
+    result = client.find_order_by_client_id("BTC/IDR", "CID-1")
+    assert result.status == OrderLookupStatus.NOT_FOUND
+
+
+def test_adapter_found_returns_order():
+    from tko.core.credentials import TokocryptoCredentials
+    from tko.core.types import SecretStr
+    from tko.exchange.order_response import OrderLookupStatus
+
+    client = TokocryptoClient(
+        TokocryptoCredentials(SecretStr("valid_api_key_xxxxx"), SecretStr("valid_api_secret_yyyy"))
+    )
+    mock_ccxt = MagicMock()
+    order = {"id": "99", "clientOrderId": "CID-1", "filled": 0.1}
+    mock_ccxt.fetch_open_orders.return_value = [order]
+    client._client = mock_ccxt
+
+    result = client.find_order_by_client_id("BTC/IDR", "CID-1")
+    assert result.status == OrderLookupStatus.FOUND
+    assert result.order is not None
+    assert result.order["id"] == "99"
+
+
+def test_recon_adapter_query_failed_no_miss_no_governor(tmp_path: Path):
+    """End-to-end: adapter QUERY_FAILED → attempts unchanged, not GOVERNOR, no POST."""
+    from tko.core.credentials import TokocryptoCredentials
+    from tko.core.types import SecretStr
+
+    client = TokocryptoClient(
+        TokocryptoCredentials(SecretStr("valid_api_key_xxxxx"), SecretStr("valid_api_secret_yyyy"))
+    )
+    mock_ccxt = MagicMock()
+    mock_ccxt.fetch_open_orders.side_effect = TimeoutError("t")
+    mock_ccxt.fetch_closed_orders.side_effect = TimeoutError("t")
+    mock_ccxt.fetch_orders.side_effect = TimeoutError("t")
+    client._client = mock_ccxt
+
+    eng = ExecutionEngine(client, Settings(min_quote_balance=1), tmp_path)
+    intent = eng.intents.create(symbol="BTC/IDR", side="buy", quote_amount=1000)
+    intent.status = OrderIntentStatus.UNKNOWN
+    intent.attempts = 0
+    eng.intents.update(intent)
+
+    for _ in range(5):
+        eng._reconcile(intent, max_misses=5)
+        intent = eng.intents.by_client_id(intent.client_order_id)
+
+    assert intent.attempts == 0
+    assert intent.status == OrderIntentStatus.RECONCILIATION
+    assert intent.error_category == "RECON_QUERY_FAILED"
+    assert intent.status != OrderIntentStatus.GOVERNOR_AUTONOMOUS
+    assert eng.intents.has_blocking_intent("BTC/IDR", "buy")
+
+    client_post = MagicMock()
+    client_post.circuit_open = False
+    client_post.create_order = MagicMock()
+    eng.client = client_post
+    eng.reconciler.client = client_post
+    client_post.validate_symbol_ready.return_value = (True, "ok")
+    constraints = MagicMock()
+    constraints.validate_notional.return_value = (True, "ok")
+    client_post.get_constraints.return_value = constraints
+    dec = RiskDecision(True, "approved", size_quote=10000, size_base=0.01)
+    assert eng.buy("BTC/IDR", "BTC", "IDR", dec, last_price=1000.0) is None
+    assert client_post.create_order.call_count == 0
