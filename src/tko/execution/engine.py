@@ -13,7 +13,8 @@ from tko.core.types import OrderResult, OrderType, Side
 from tko.exchange.tokocrypto import TokocryptoClient, TokocryptoError
 from tko.execution.errors import ErrorCategory, is_ambiguous
 from tko.execution.intent import IntentStore, OrderIntent, OrderIntentStatus
-from tko.risk.engine import RiskDecision
+from tko.risk.engine import RiskDecision, RiskEngine
+from tko.risk.position_store import PositionStore
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +30,55 @@ class PositionState:
 
 
 class ExecutionEngine:
-    def __init__(self, client: TokocryptoClient, settings: Settings, state_dir: Path) -> None:
+    def __init__(
+        self,
+        client: TokocryptoClient,
+        settings: Settings,
+        state_dir: Path,
+        risk: RiskEngine | None = None,
+        positions_store: PositionStore | None = None,
+    ) -> None:
         self.client = client
         self.s = settings
+        self.risk = risk
+        self.positions_store = positions_store or PositionStore(state_dir / "positions.json")
         self.positions: dict[str, PositionState] = {}
         self.intents = IntentStore(state_dir / "order_intents.json")
+        self._hydrate_positions_memory()
+
+    def _hydrate_positions_memory(self) -> None:
+        for pos in self.positions_store.all():
+            self.positions[pos.symbol] = PositionState(
+                symbol=pos.symbol, base=pos.base, quote=pos.quote,
+                amount=pos.amount, entry_price=pos.entry_price, opened_at=pos.opened_at,
+            )
+
+    def load_entry_price(self, symbol: str) -> float | None:
+        mem = self.positions.get(symbol)
+        if mem and mem.entry_price > 0:
+            return mem.entry_price
+        stored = self.positions_store.get(symbol)
+        if stored and stored.entry_price > 0:
+            return stored.entry_price
+        return None
 
     def reconcile_pending(self) -> None:
         for intent in list(self.intents.unresolved_unknown()):
             self._reconcile(intent)
+
+    def _precheck_notional(self, notional: float, *, side: str) -> tuple[bool, str]:
+        if notional <= 0:
+            return False, "notional is zero"
+        if self.s.max_order_notional > 0 and notional > float(self.s.max_order_notional) + 1e-9:
+            return False, f"notional {notional:.4f} exceeds max_order_notional {self.s.max_order_notional:.4f}"
+        if self.risk is not None and self.s.max_daily_notional > 0:
+            used = self.risk.pnl.today_notional()
+            if used + notional > float(self.s.max_daily_notional) + 1e-9:
+                return False, (
+                    f"daily notional {used:.4f}+{notional:.4f} exceeds "
+                    f"max_daily_notional {self.s.max_daily_notional:.4f}"
+                )
+        return True, "ok"
 
     def buy(self, symbol: str, base: str, quote: str, decision: RiskDecision, last_price: float) -> OrderResult | None:
         if not decision.approved or decision.size_quote <= 0:
@@ -48,6 +89,10 @@ class ExecutionEngine:
         if self.intents.has_blocking_intent(symbol, "buy"):
             logger.warning("event=order_retry_blocked symbol=%s side=buy reason=active_intent", symbol)
             return None
+        ok_n, n_reason = self._precheck_notional(decision.size_quote, side="buy")
+        if not ok_n:
+            logger.error("event=order_validation_failed symbol=%s reason=%s", symbol, n_reason)
+            return None
         ok, reason = self.client.validate_symbol_ready(symbol)
         if not ok:
             logger.error("event=order_validation_failed symbol=%s reason=%s", symbol, reason)
@@ -57,9 +102,9 @@ class ExecutionEngine:
             logger.error("event=order_validation_failed symbol=%s reason=no_constraints", symbol)
             return None
         quote_amt = Decimal(str(decision.size_quote))
-        ok_n, n_reason = constraints.validate_notional(quote_amt)
-        if not ok_n:
-            logger.error("event=order_validation_failed symbol=%s reason=%s", symbol, n_reason)
+        ok_n2, n_reason2 = constraints.validate_notional(quote_amt)
+        if not ok_n2:
+            logger.error("event=order_validation_failed symbol=%s reason=%s", symbol, n_reason2)
             return None
         intent = self.intents.create(
             symbol=symbol, side="buy", quote_amount=float(quote_amt),
@@ -69,7 +114,6 @@ class ExecutionEngine:
         intent.status = OrderIntentStatus.NORMALIZED
         intent.normalized_base = est_base
         self.intents.update(intent)
-        logger.info("event=order_normalized client_order_id=%s side=buy quote_amount=%s", intent.client_order_id, quote_amt)
         return self._submit(intent, side=Side.BUY, base_amount=0.0, quote_amount=float(quote_amt), base=base, quote=quote)
 
     def sell(self, symbol: str, decision: RiskDecision, last_price: float, *, base: str | None = None, quote: str | None = None) -> OrderResult | None:
@@ -80,6 +124,11 @@ class ExecutionEngine:
             return None
         if self.intents.has_blocking_intent(symbol, "sell"):
             logger.warning("event=order_retry_blocked symbol=%s side=sell reason=active_intent", symbol)
+            return None
+        est_notional = decision.size_base * last_price
+        ok_n, n_reason = self._precheck_notional(est_notional, side="sell")
+        if not ok_n and "kill" not in decision.reason.lower():
+            logger.error("event=order_validation_failed symbol=%s reason=%s", symbol, n_reason)
             return None
         ok, reason = self.client.validate_symbol_ready(symbol)
         if not ok:
@@ -95,10 +144,10 @@ class ExecutionEngine:
         if not ok_q:
             logger.error("event=order_validation_failed symbol=%s reason=%s", symbol, q_reason)
             return None
-        est_notional = norm * Decimal(str(last_price))
-        ok_n, n_reason = constraints.validate_notional(est_notional)
-        if not ok_n:
-            logger.error("event=order_validation_failed symbol=%s reason=%s", symbol, n_reason)
+        est_notional2 = norm * Decimal(str(last_price))
+        ok_n2, n_reason2 = constraints.validate_notional(est_notional2)
+        if not ok_n2:
+            logger.error("event=order_validation_failed symbol=%s reason=%s", symbol, n_reason2)
             return None
         intent = self.intents.create(
             symbol=symbol, side="sell", base_amount=float(raw_qty),
@@ -107,14 +156,16 @@ class ExecutionEngine:
         intent.normalized_base = float(norm)
         intent.status = OrderIntentStatus.NORMALIZED
         self.intents.update(intent)
-        logger.info("event=order_normalized client_order_id=%s side=sell qty=%s", intent.client_order_id, norm)
         return self._submit(intent, side=Side.SELL, base_amount=float(norm), quote_amount=None, base=base or "", quote=quote or "")
 
     def _submit(self, intent: OrderIntent, *, side: Side, base_amount: float, quote_amount: float | None, base: str, quote: str) -> OrderResult | None:
         intent.status = OrderIntentStatus.SUBMITTING
         intent.attempts += 1
         self.intents.update(intent)
-        logger.info("event=order_submitting client_order_id=%s symbol=%s side=%s attempt=%d mode=LIVE", intent.client_order_id, intent.symbol, side.value, intent.attempts)
+        logger.info(
+            "event=order_submitting client_order_id=%s symbol=%s side=%s attempt=%d mode=LIVE",
+            intent.client_order_id, intent.symbol, side.value, intent.attempts,
+        )
         try:
             result = self.client.create_order(
                 symbol=intent.symbol, side=side, amount=base_amount,
@@ -127,7 +178,6 @@ class ExecutionEngine:
             if exc.ambiguous or is_ambiguous(exc.category):
                 intent.status = OrderIntentStatus.UNKNOWN
                 self.intents.update(intent)
-                logger.error("event=order_submission_unknown client_order_id=%s reason=%s", intent.client_order_id, exc.category.value)
                 self._reconcile(intent)
                 if intent.status == OrderIntentStatus.CONFIRMED:
                     return self._result_from_intent(intent, side)
@@ -149,19 +199,46 @@ class ExecutionEngine:
         intent.filled = result.filled
         intent.average = result.average
         self.intents.update(intent)
-        logger.info("event=order_submission_success client_order_id=%s exchange_order_id=%s", intent.client_order_id, result.id)
-        if side == Side.BUY:
-            filled = result.filled or intent.normalized_base or 0.0
-            avg = result.average or intent.last_price or 0.0
-            self.positions[intent.symbol] = PositionState(symbol=intent.symbol, base=base, quote=quote, amount=filled, entry_price=avg)
-        else:
-            self.positions.pop(intent.symbol, None)
+        self._on_fill_confirmed(intent, side, result, base=base, quote=quote)
         return result
+
+    def _on_fill_confirmed(self, intent: OrderIntent, side: Side, result: OrderResult, *, base: str, quote: str) -> None:
+        avg = result.average or intent.last_price or 0.0
+        filled = result.filled or intent.normalized_base or intent.base_amount or 0.0
+        if side == Side.BUY:
+            notional = float(intent.quote_amount or (filled * avg))
+            self.positions[intent.symbol] = PositionState(
+                symbol=intent.symbol, base=base, quote=quote, amount=filled, entry_price=avg
+            )
+            self.positions_store.upsert(
+                symbol=intent.symbol, base=base, quote=quote, amount=filled, entry_price=avg,
+                order_id=result.id, client_order_id=intent.client_order_id or "",
+            )
+            if self.risk is not None:
+                self.risk.record_fill(
+                    side="buy", symbol=intent.symbol, notional=notional, pnl=0.0,
+                    order_id=result.id, client_order_id=intent.client_order_id or "",
+                )
+        else:
+            entry = self.load_entry_price(intent.symbol) or avg
+            notional = filled * avg
+            pnl = (avg - entry) * filled if entry > 0 else 0.0
+            self.positions_store.reduce_or_close(intent.symbol, filled)
+            if intent.symbol in self.positions:
+                left = self.positions[intent.symbol].amount - filled
+                if left <= 1e-12:
+                    self.positions.pop(intent.symbol, None)
+                else:
+                    self.positions[intent.symbol].amount = left
+            if self.risk is not None:
+                self.risk.record_fill(
+                    side="sell", symbol=intent.symbol, notional=notional, pnl=pnl,
+                    order_id=result.id, client_order_id=intent.client_order_id or "",
+                )
 
     def _reconcile(self, intent: OrderIntent) -> None:
         intent.status = OrderIntentStatus.RECONCILIATION
         self.intents.update(intent)
-        logger.info("event=order_reconciliation_started client_order_id=%s", intent.client_order_id)
         found = self.client.find_order_by_client_id(intent.symbol, intent.client_order_id)
         if found:
             intent.status = OrderIntentStatus.CONFIRMED
@@ -170,11 +247,14 @@ class ExecutionEngine:
             avg = found.get("average") or found.get("price")
             intent.average = float(avg) if avg is not None else None
             self.intents.update(intent)
-            logger.info("event=order_reconciled client_order_id=%s exchange_order_id=%s final_status=CONFIRMED", intent.client_order_id, intent.exchange_order_id)
+            side = Side.BUY if intent.side == "buy" else Side.SELL
+            synthetic = self._result_from_intent(intent, side)
+            base = intent.symbol.split("/")[0] if "/" in intent.symbol else ""
+            quote = intent.symbol.split("/")[1] if "/" in intent.symbol else ""
+            self._on_fill_confirmed(intent, side, synthetic, base=base, quote=quote)
             return
         intent.status = OrderIntentStatus.RETRY_ELIGIBLE
         self.intents.update(intent)
-        logger.info("event=order_reconciliation_not_found client_order_id=%s final_status=RETRY_ELIGIBLE", intent.client_order_id)
 
     def _result_from_intent(self, intent: OrderIntent, side: Side) -> OrderResult:
         return OrderResult(
