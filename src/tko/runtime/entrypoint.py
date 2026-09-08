@@ -11,6 +11,7 @@ from getpass import getpass
 from tko import __version__
 from tko.core.config import load_settings
 from tko.core.credentials import (
+    CredentialError,
     CredentialNotFoundError,
     load_tokocrypto,
     save_telegram,
@@ -33,22 +34,29 @@ def _setup_logging(level: str) -> None:
 
 def cmd_setup(_: argparse.Namespace) -> int:
     print("=== TKO Credential Setup (Tokocrypto LIVE) ===")
-    print("Pastikan API Key punya izin TRADING dan WITHDRAWAL = DISABLED.\n")
+    print("Kredensial disimpan di OS keyring (fail-closed).\n")
     api_key = input("Tokocrypto API Key: ").strip()
     api_secret = getpass("Tokocrypto API Secret: ").strip()
     if not api_key or not api_secret:
         print("API key/secret wajib diisi.")
         return 1
-    save_tokocrypto(api_key, api_secret)
-    print("Tokocrypto credentials saved.\n")
-
+    try:
+        save_tokocrypto(api_key, api_secret)
+    except CredentialError as exc:
+        print(f"Gagal menyimpan: {exc}")
+        return 1
+    print("Tokocrypto credentials saved to keyring.\n")
     use_tg = input("Setup Telegram? [y/N]: ").strip().lower()
     if use_tg in ("y", "yes"):
         token = input("Telegram Bot Token: ").strip()
         chat = input("Telegram Chat ID: ").strip()
         if token and chat:
-            save_telegram(token, chat)
-            print("Telegram credentials saved.")
+            try:
+                save_telegram(token, chat)
+                print("Telegram credentials saved to keyring.")
+            except CredentialError as exc:
+                print(f"Gagal Telegram: {exc}")
+                return 1
     print("\nSelesai. Jalankan: python -m tko run")
     return 0
 
@@ -56,7 +64,6 @@ def cmd_setup(_: argparse.Namespace) -> int:
 def cmd_run(_: argparse.Namespace) -> int:
     settings = load_settings()
     _setup_logging(settings.log_level)
-
     from tko.runtime.instance_lock import InstanceLock, InstanceLockError
 
     lock = InstanceLock(state_dir() / "tko.lock")
@@ -77,7 +84,7 @@ def cmd_run(_: argparse.Namespace) -> int:
     try:
         try:
             load_tokocrypto()
-        except CredentialNotFoundError as exc:
+        except (CredentialNotFoundError, CredentialError) as exc:
             print(exc)
             return 1
         from tko.runtime.bot import TradingBot
@@ -98,10 +105,11 @@ def cmd_status(_: argparse.Namespace) -> int:
     settings = load_settings()
     _setup_logging(settings.log_level)
     from tko.exchange.tokocrypto import TokocryptoClient
+    from tko.runtime.metrics import MetricsStore
 
     try:
         creds = load_tokocrypto()
-    except CredentialNotFoundError as exc:
+    except (CredentialNotFoundError, CredentialError) as exc:
         print(exc)
         return 1
     client = TokocryptoClient(creds)
@@ -111,10 +119,9 @@ def cmd_status(_: argparse.Namespace) -> int:
     for asset, b in sorted(bal.items()):
         if b.total > 0:
             print(f"  {asset:8s} free={b.free:.8f}  used={b.used:.8f}  total={b.total:.8f}")
-    symbol = client.resolve_symbol(settings.base_asset, settings.quote_asset)
-    if symbol:
-        t = client.fetch_ticker(symbol)
-        print(f"\n{symbol} last={t.last}")
+    m = MetricsStore(state_dir() / "metrics.json").snapshot()
+    print(f"\n=== Metrics ===\n  status={m.status} orders_today={m.orders_today} "
+          f"ok={m.orders_success} fail={m.orders_failed} pnl={m.daily_pnl:.4f}")
     client.close()
     return 0
 
@@ -123,20 +130,53 @@ def cmd_stop(_: argparse.Namespace) -> int:
     from tko.risk.engine import RiskEngine
 
     settings = load_settings()
-    risk = RiskEngine(settings, state_dir())
-    risk.activate_kill_switch("cli stop")
-    print("Kill switch activated. Bot will stop opening new positions.")
+    RiskEngine(settings, state_dir()).activate_kill_switch("cli stop")
+    print("Kill switch activated.")
+    return 0
+
+
+def cmd_backup(_: argparse.Namespace) -> int:
+    from tko.runtime.backup import backup_state
+    from tko.runtime.paths import app_root
+
+    path = backup_state(state_dir(), app_root() / "backups")
+    print(f"Backup written: {path}")
+    return 0
+
+
+def cmd_watchdog(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    _setup_logging(settings.log_level)
+    from tko.core.credentials import load_telegram
+    from tko.notify.telegram import TelegramNotifier
+    from tko.runtime.watchdog import Watchdog
+
+    notify = TelegramNotifier(load_telegram() if settings.telegram_enabled else None)
+
+    def on_stale(age: float) -> None:
+        notify.send(f"TKO WATCHDOG: heartbeat stale age={age}s")
+
+    wd = Watchdog(
+        state_dir() / "heartbeat.json",
+        stale_after_sec=float(getattr(args, "stale_after", None) or settings.heartbeat_stale_sec),
+        on_stale=on_stale,
+    )
+    print(f"Watchdog monitoring (stale_after={wd.stale_after_sec}s). Ctrl+C to stop.")
+    try:
+        wd.run_loop(interval_sec=float(getattr(args, "interval", 30) or 30))
+    except KeyboardInterrupt:
+        print("Watchdog stopped.")
     return 0
 
 
 def cmd_install_service(args: argparse.Namespace) -> int:
     from tko.runtime.windows_service import DEFAULT_TASK_NAME, install_scheduled_task
 
-    task_name = getattr(args, "task_name", None) or DEFAULT_TASK_NAME
-    force = bool(getattr(args, "force", False))
-    use_system = bool(getattr(args, "use_system", False))
-
-    result = install_scheduled_task(task_name, force=force, use_system=use_system)
+    result = install_scheduled_task(
+        getattr(args, "task_name", None) or DEFAULT_TASK_NAME,
+        force=bool(getattr(args, "force", False)),
+        use_system=bool(getattr(args, "use_system", False)),
+    )
     print(result.message)
     if result.detail and not result.ok:
         print(result.detail)
@@ -146,8 +186,7 @@ def cmd_install_service(args: argparse.Namespace) -> int:
 def cmd_uninstall_service(args: argparse.Namespace) -> int:
     from tko.runtime.windows_service import DEFAULT_TASK_NAME, uninstall_scheduled_task
 
-    task_name = getattr(args, "task_name", None) or DEFAULT_TASK_NAME
-    result = uninstall_scheduled_task(task_name)
+    result = uninstall_scheduled_task(getattr(args, "task_name", None) or DEFAULT_TASK_NAME)
     print(result.message)
     if result.detail and not result.ok:
         print(result.detail)
@@ -157,32 +196,28 @@ def cmd_uninstall_service(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="tko", description="TKO Tokocrypto LIVE bot")
     parser.add_argument("--version", action="store_true")
-    parser.add_argument("--smoke", action="store_true", help="packaging smoke (no orders)")
+    parser.add_argument("--smoke", action="store_true")
     sub = parser.add_subparsers(dest="command")
 
-    p_setup = sub.add_parser("setup", help="Save API key + Telegram")
-    p_setup.set_defaults(func=cmd_setup)
+    sub.add_parser("setup").set_defaults(func=cmd_setup)
+    sub.add_parser("run").set_defaults(func=cmd_run)
+    sub.add_parser("status").set_defaults(func=cmd_status)
+    sub.add_parser("stop").set_defaults(func=cmd_stop)
+    sub.add_parser("backup").set_defaults(func=cmd_backup)
 
-    p_run = sub.add_parser("run", help="Start LIVE bot")
-    p_run.set_defaults(func=cmd_run)
+    p_wd = sub.add_parser("watchdog")
+    p_wd.add_argument("--stale-after", type=float, default=None)
+    p_wd.add_argument("--interval", type=float, default=30.0)
+    p_wd.set_defaults(func=cmd_watchdog)
 
-    p_status = sub.add_parser("status", help="Show balances")
-    p_status.set_defaults(func=cmd_status)
-
-    p_stop = sub.add_parser("stop", help="Activate kill switch")
-    p_stop.set_defaults(func=cmd_stop)
-
-    p_install = sub.add_parser(
-        "install-service",
-        help="Install Windows scheduled task (ONSTART)",
-    )
-    p_install.add_argument("--task-name", default="TkoBot", help="Scheduled task name (default: TkoBot)")
-    p_install.add_argument("--force", action="store_true", help="Overwrite existing task")
-    p_install.add_argument("--use-system", action="store_true", help="Run as SYSTEM (opt-in)")
+    p_install = sub.add_parser("install-service")
+    p_install.add_argument("--task-name", default="TkoBot")
+    p_install.add_argument("--force", action="store_true")
+    p_install.add_argument("--use-system", action="store_true")
     p_install.set_defaults(func=cmd_install_service)
 
-    p_uninstall = sub.add_parser("uninstall-service", help="Remove Windows scheduled task")
-    p_uninstall.add_argument("--task-name", default="TkoBot", help="Scheduled task name")
+    p_uninstall = sub.add_parser("uninstall-service")
+    p_uninstall.add_argument("--task-name", default="TkoBot")
     p_uninstall.set_defaults(func=cmd_uninstall_service)
 
     args = parser.parse_args(argv)
