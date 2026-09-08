@@ -25,18 +25,19 @@ classifiers = [
 ]
 
 dependencies = [
-    "ccxt>=4.2.0,<5",
-    "python-telegram-bot>=21.0,<23",
-    "pydantic>=2.0,<3",
-    "pydantic-settings>=2.0,<3",
-    "keyring>=25.0,<27",
+    # Prefer requirements.lock for bit-for-bit reproducible installs (CI).
+    "ccxt>=4.5.29,<5",
+    "python-telegram-bot>=22.5,<23",
+    "pydantic>=2.12.5,<3",
+    "pydantic-settings>=2.12.0,<3",
+    "keyring>=25.7.0,<27",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.4",
-    "pytest-cov>=4.1",
-    "ruff>=0.4",
+    "pytest>=9.0.2",
+    "pytest-cov>=6.0",
+    "ruff>=0.14.7",
 ]
 packaging = [
     "pyinstaller>=6.0",

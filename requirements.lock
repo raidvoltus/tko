@@ -1,0 +1,15 @@
+# Exact pins for reproducible installs (Stage-1 fix).
+# Install: pip install -r requirements.lock
+# Then:    pip install -e ".[dev]"
+#
+# Direct runtime dependencies
+ccxt==4.5.29
+pydantic==2.12.5
+pydantic-settings==2.12.0
+keyring==25.7.0
+python-telegram-bot==22.5
+
+# Direct dev dependencies
+pytest==9.0.2
+ruff==0.14.7
+pytest-cov==6.2.1
