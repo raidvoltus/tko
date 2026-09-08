@@ -82,22 +82,18 @@ class TradingBot:
         logger.critical("event=runtime_halted reason=%s", reason[:300])
 
     def _startup_barrier(self) -> bool:
-        """Fail-closed startup. True only if READY reached."""
         self.lifecycle.force(LifecycleState.STARTING, reason="startup")
         self._hb("STARTING")
         self.audit.record("DECISION", reason="runtime_starting")
-
         try:
             self.client.connect()
             self.lifecycle.mark_exchange_contact()
         except Exception as exc:
             self._halt(f"exchange_connect_failed:{exc}")
             return False
-
         self.lifecycle.transition(LifecycleState.RECONCILING, reason="startup_recon")
         self._hb("RECONCILING")
         self.audit.record("DECISION", reason="runtime_reconciling")
-
         try:
             balances = self.client.fetch_balance()
             self.lifecycle.mark_exchange_contact()
@@ -115,18 +111,15 @@ class TradingBot:
         except Exception as exc:
             self._halt(f"startup_reconciliation_failed:{exc}")
             return False
-
         if self.risk.kill_switch_active():
             self.lifecycle.transition(LifecycleState.KILL, reason="kill_switch_active_on_startup")
             self._hb("KILL")
             self.metrics.set_status("KILL")
             self.audit.record("ERROR", reason="kill_switch_active_on_startup")
             return False
-
         if self.client.circuit_open:
             self._halt(f"circuit_open:{self.client.circuit_reason}")
             return False
-
         if not self.lifecycle.transition(LifecycleState.READY, reason="startup_ok"):
             self._halt("cannot_enter_ready")
             return False
@@ -151,7 +144,6 @@ class TradingBot:
                 self._hb()
                 time.sleep(self.s.loop_interval_sec)
             return
-
         try:
             while self._running and not self._stop_requested:
                 if not self.lifecycle.trading_authorized:
@@ -159,15 +151,10 @@ class TradingBot:
                     if self.lifecycle.state == LifecycleState.KILL:
                         time.sleep(self.s.loop_interval_sec)
                         continue
-                    if self.lifecycle.state in (
-                        LifecycleState.HALTED,
-                        LifecycleState.STOPPING,
-                        LifecycleState.STOPPED,
-                    ):
+                    if self.lifecycle.state in (LifecycleState.HALTED, LifecycleState.STOPPING, LifecycleState.STOPPED):
                         break
                     time.sleep(self.s.loop_interval_sec)
                     continue
-
                 self._hb("READY")
                 if self.s.telegram_kill_command:
                     try:
@@ -182,9 +169,7 @@ class TradingBot:
                     time.sleep(self.s.loop_interval_sec)
                     continue
                 if self.client.circuit_open:
-                    self.lifecycle.transition(
-                        LifecycleState.DEGRADED, reason=f"circuit:{self.client.circuit_reason}"
-                    )
+                    self.lifecycle.transition(LifecycleState.DEGRADED, reason=f"circuit:{self.client.circuit_reason}")
                     self.metrics.set_status("ERROR", "circuit_open")
                     self._hb("DEGRADED")
                     self.notify.send("TKO: exchange circuit breaker OPEN")
@@ -214,7 +199,6 @@ class TradingBot:
                 self.stop()
 
     def stop(self) -> None:
-        """Idempotent graceful shutdown (INV-25)."""
         if self.lifecycle.state == LifecycleState.STOPPED:
             return
         self._stop_requested = True
@@ -268,7 +252,7 @@ class TradingBot:
                 ticker = self.client.fetch_ticker(symbol)
                 last = float(ticker.last or 0)
             except Exception as exc:
-                logger.warning("ticker failed %s: %s", symbol, exp)
+                logger.warning("ticker failed %s: %s", symbol, exc)
                 continue
             if last <= 0:
                 continue
@@ -279,14 +263,10 @@ class TradingBot:
             if decision.approved and decision.size_base > 0:
                 if not self.lifecycle.trading_authorized:
                     return acted
-                result = self.execution.sell(
-                    symbol, decision, last, base=base, quote=quote_used
-                )
+                result = self.execution.sell(symbol, decision, last, base=base, quote=quote_used)
                 if result:
                     acted = True
-                    self.notify.send(
-                        f"SELL {symbol} filled={result.filled} avg={result.average}"
-                    )
+                    self.notify.send(f"SELL {symbol} filled={result.filled} avg={result.average}")
         return acted
 
     def _try_buy_primary(self, free_map: dict[str, float]) -> None:
@@ -306,7 +286,7 @@ class TradingBot:
                 ticker = self.client.fetch_ticker(symbol)
                 last = float(ticker.last or 0)
             except Exception as exc:
-                logger.warning("market data failed %s: %s", symbol, exp)
+                logger.warning("market data failed %s: %s", symbol, exc)
                 continue
             if last <= 0:
                 continue
@@ -322,7 +302,5 @@ class TradingBot:
                 return
             result = self.execution.buy(symbol, base, quote, decision, last)
             if result:
-                self.notify.send(
-                    f"BUY {symbol} filled={result.filled} avg={result.average}"
-                )
+                self.notify.send(f"BUY {symbol} filled={result.filled} avg={result.average}")
             return
