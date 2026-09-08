@@ -1,4 +1,4 @@
-"""Windows Task Scheduler install/uninstall helpers for portable TKO."""
+"""Windows scheduled-task helpers for portable TKO .exe (schtasks only)."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+DEFAULT_TASK_NAME = "TkoBot"
 SCHTASKS = "schtasks"
-DEFAULT_TASK_NAME = "TKO-LiveBot"
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,17 +21,12 @@ class ServicePlan:
 
 
 def resolve_exe_and_workdir() -> tuple[Path, Path]:
-    if getattr(sys, "frozen", False):
-        exe = Path(sys.executable).resolve()
-        work = exe.parent
-    else:
-        exe = Path(sys.executable).resolve()
-        work = Path.cwd().resolve()
-    return exe, work
+    exe = Path(sys.executable).resolve()
+    return exe, exe.parent
 
 
-def build_task_command_line(exe: Path, work: Path) -> str:
-    return f'"{exe}" run --state-dir "{work / "state"}"'
+def build_task_command_line(exe: Path, work_dir: Path) -> str:
+    return f'cmd.exe /c cd /d "{work_dir}" && "{exe}" run'
 
 
 def build_service_plan(task_name: str = DEFAULT_TASK_NAME) -> ServicePlan:
@@ -56,8 +51,16 @@ def schtasks_create_args(
     run_as_user: str | None = None,
 ) -> list[str]:
     args = [
-        SCHTASKS, "/Create", "/TN", plan.task_name, "/TR", plan.command_line,
-        "/SC", "ONSTART", "/RL", "HIGHEST",
+        SCHTASKS,
+        "/Create",
+        "/TN",
+        plan.task_name,
+        "/TR",
+        plan.command_line,
+        "/SC",
+        "ONSTART",
+        "/RL",
+        "HIGHEST",
     ]
     if use_system:
         args.extend(["/RU", "SYSTEM"])
@@ -130,7 +133,8 @@ def install_scheduled_task(
         return ServiceResult(False, f"Task sudah ada: {plan.task_name}. Gunakan --force.")
     result = run_schtasks(schtasks_create_args(plan, force=force, use_system=use_system))
     if result.returncode != 0:
-        return ServiceResult(False, "schtasks /Create gagal", detail=(result.stderr or result.stdout or "")[:500])
+        detail = (result.stderr or result.stdout or "")[:500]
+        return ServiceResult(False, "schtasks /Create gagal", detail=detail)
     return ServiceResult(True, f"Task terpasang: {plan.task_name}", detail=restart_policy_notes())
 
 
@@ -141,7 +145,8 @@ def uninstall_scheduled_task(task_name: str = DEFAULT_TASK_NAME) -> ServiceResul
         return ServiceResult(True, f"Task tidak ada (noop): {task_name}")
     result = run_schtasks(schtasks_delete_args(task_name))
     if result.returncode != 0:
-        return ServiceResult(False, "schtasks /Delete gagal", detail=(result.stderr or result.stdout or "")[:500])
+        detail = (result.stderr or result.stdout or "")[:500]
+        return ServiceResult(False, "schtasks /Delete gagal", detail=detail)
     return ServiceResult(True, f"Task dihapus: {task_name}")
 
 
