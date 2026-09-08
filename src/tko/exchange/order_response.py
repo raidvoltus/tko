@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 
@@ -83,3 +84,39 @@ def validate_order_payload(
         symbol=str(symbol) if symbol is not None else None,
         side=str(side).lower() if side is not None else None,
     )
+
+
+class OrderLookupStatus(str, Enum):
+    """Explicit recon lookup outcome — never collapse QUERY_FAILED into NOT_FOUND."""
+
+    FOUND = "FOUND"
+    NOT_FOUND = "NOT_FOUND"
+    QUERY_FAILED = "QUERY_FAILED"
+
+
+class OrderLookupResult:
+    """Typed result for find_order_by_client_id (INV-18)."""
+
+    __slots__ = ("status", "order", "error")
+
+    def __init__(
+        self,
+        status: OrderLookupStatus,
+        order: dict | None = None,
+        error: str | None = None,
+    ) -> None:
+        self.status = status
+        self.order = order
+        self.error = error
+
+    @classmethod
+    def found(cls, order: dict) -> "OrderLookupResult":
+        return cls(OrderLookupStatus.FOUND, order=order)
+
+    @classmethod
+    def not_found(cls) -> "OrderLookupResult":
+        return cls(OrderLookupStatus.NOT_FOUND)
+
+    @classmethod
+    def query_failed(cls, error: str) -> "OrderLookupResult":
+        return cls(OrderLookupStatus.QUERY_FAILED, error=error)

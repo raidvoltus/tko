@@ -7,7 +7,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from tko.audit.audit_log import AuditLog
-from tko.exchange.order_response import InvalidOrderResponse, validate_order_payload
+from tko.exchange.order_response import (
+    InvalidOrderResponse,
+    OrderLookupResult,
+    OrderLookupStatus,
+    validate_order_payload,
+)
 from tko.execution.intent import IntentStore, OrderIntent, OrderIntentStatus
 from tko.risk.position_store import PositionStore
 
@@ -56,22 +61,39 @@ class Reconciler:
         self.intents.update(intent)
 
         cid = intent.client_order_id or ""
-        found = None
-        query_failed = False
         try:
-            found = self.client.find_order_by_client_id(intent.symbol, cid)
+            lookup = self.client.find_order_by_client_id(intent.symbol, cid)
         except Exception as exc:
-            query_failed = True
             intent.error_category = "RECON_QUERY_FAILED"
             intent.error_message = str(exc)[:300]
             self.intents.update(intent)
             logger.warning("event=reconcile_query_failed cid=%s err=%s", cid, exc)
             return intent
 
-        if found is not None:
+        # Backward-compat: plain dict or None from mocks/legacy clients
+        if not isinstance(lookup, OrderLookupResult):
+            if lookup is None:
+                lookup = OrderLookupResult.not_found()
+            elif isinstance(lookup, dict):
+                lookup = OrderLookupResult.found(lookup)
+            else:
+                intent.error_category = "RECON_QUERY_FAILED"
+                intent.error_message = f"unexpected lookup type: {type(lookup).__name__}"
+                self.intents.update(intent)
+                return intent
+
+        if lookup.status == OrderLookupStatus.QUERY_FAILED:
+            intent.error_category = "RECON_QUERY_FAILED"
+            intent.error_message = (lookup.error or "query failed")[:300]
+            # Stay RECONCILIATION — do NOT increment miss counter (INV-18)
+            self.intents.update(intent)
+            logger.warning("event=reconcile_query_failed cid=%s err=%s", cid, lookup.error)
+            return intent
+
+        if lookup.status == OrderLookupStatus.FOUND and lookup.order is not None:
             try:
                 validated = validate_order_payload(
-                    found,
+                    lookup.order,
                     expected_client_order_id=cid,
                     require_client_id_match=False,
                 )
@@ -85,7 +107,9 @@ class Reconciler:
             intent.status = OrderIntentStatus.CONFIRMED
             intent.exchange_order_id = validated.id
             intent.filled = validated.filled
-            intent.average = validated.average if validated.average is not None else validated.price
+            intent.average = (
+                validated.average if validated.average is not None else validated.price
+            )
             intent.error_category = ""
             intent.error_message = ""
             self.intents.update(intent)
@@ -107,12 +131,15 @@ class Reconciler:
                     logger.warning("on_confirmed hook failed: %s", exc)
             return intent
 
-        if not query_failed:
+        # NOT_FOUND only — definitive miss for this attempt (INV-18)
+        if lookup.status == OrderLookupStatus.NOT_FOUND:
             intent.attempts = int(intent.attempts or 0) + 1
             if intent.attempts >= self.max_unknown_checks:
                 intent.status = OrderIntentStatus.GOVERNOR_AUTONOMOUS
                 intent.error_category = "ORDER_NOT_FOUND"
-                intent.error_message = f"not found after {intent.attempts} successful lookups"
+                intent.error_message = (
+                    f"not found after {intent.attempts} successful lookups"
+                )
                 self.intents.update(intent)
                 logger.critical(
                     "event=order_governor_autonomous cid=%s attempts=%d",
