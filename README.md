@@ -42,3 +42,27 @@ tko.exe uninstall-service
 - Quantity SELL floor Decimal
 - LOT_SIZE / MARKET_LOT_SIZE / minNotional
 - 429 / 418 circuit breaker
+
+## State authority (SSOT)
+
+Exchange balances/orders are authoritative. Local stores are caches that must
+reconcile:
+
+| Store | Path | Role |
+|-------|------|------|
+| Intent | `state/order_intents.json` | Order lifecycle + clientOrderId |
+| Positions | `state/positions.json` | Entry/qty cache → recon vs balance |
+| PnL | `state/pnl_ledger.jsonl` | Confirmed fills only (append-only) |
+| Lock | `state/tko.lock` | Single live instance |
+| Kill | `state/KILL` | Halt trading |
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Reproducible install
+
+```text
+pip install -r requirements.lock
+pip install -e ".[dev]"
+```
+
+CI installs from `requirements.lock` (exact pins). Prefer the lockfile over open ranges.
