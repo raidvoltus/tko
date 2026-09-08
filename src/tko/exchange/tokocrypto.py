@@ -21,13 +21,7 @@ DEFAULT_RATE_LIMIT_COOLDOWN_SEC = 60.0
 
 
 class TokocryptoError(Exception):
-    def __init__(
-        self,
-        message: str,
-        *,
-        category: ErrorCategory = ErrorCategory.UNKNOWN_ERROR,
-        ambiguous: bool = False,
-    ) -> None:
+    def __init__(self, message: str, *, category: ErrorCategory = ErrorCategory.UNKNOWN_ERROR, ambiguous: bool = False) -> None:
         super().__init__(message)
         self.category = category
         self.ambiguous = ambiguous
@@ -45,11 +39,7 @@ class TokocryptoClient:
 
     @property
     def circuit_open(self) -> bool:
-        if self._circuit_open:
-            return True
-        if self._rate_limit_until > time.time():
-            return True
-        return False
+        return bool(self._circuit_open or self._rate_limit_until > time.time())
 
     @property
     def circuit_reason(self) -> str | None:
@@ -67,29 +57,18 @@ class TokocryptoClient:
     def trip_rate_limit(self, cooldown_sec: float = DEFAULT_RATE_LIMIT_COOLDOWN_SEC) -> None:
         until = time.time() + max(1.0, float(cooldown_sec))
         self._rate_limit_until = max(self._rate_limit_until, until)
-        logger.warning(
-            "event=rate_limit_cooldown_armed cooldown_sec=%.1f until=%.0f",
-            cooldown_sec,
-            self._rate_limit_until,
-        )
+        logger.warning("event=rate_limit_cooldown_armed cooldown_sec=%.1f until=%.0f", cooldown_sec, self._rate_limit_until)
 
     def connect(self) -> None:
         if self._client is not None:
             return
-        options: dict[str, Any] = {
-            "defaultType": "spot",
-            "adjustForTimeDifference": True,
-            "recvWindow": DEFAULT_RECV_WINDOW,
-        }
-        self._client = ccxt.tokocrypto(
-            {
-                "apiKey": self._creds.api_key.get_secret_value(),
-                "secret": self._creds.api_secret.get_secret_value(),
-                "enableRateLimit": True,
-                "timeout": int(self._timeout_ms),
-                "options": options,
-            }
-        )
+        self._client = ccxt.tokocrypto({
+            "apiKey": self._creds.api_key.get_secret_value(),
+            "secret": self._creds.api_secret.get_secret_value(),
+            "enableRateLimit": True,
+            "timeout": int(self._timeout_ms),
+            "options": {"defaultType": "spot", "adjustForTimeDifference": True, "recvWindow": DEFAULT_RECV_WINDOW},
+        })
         self._client.load_markets()
         self._constraints_cache.clear()
         for sym, m in (self._client.markets or {}).items():
@@ -97,13 +76,8 @@ class TokocryptoClient:
                 self._constraints_cache[sym] = extract_market_constraints(m)
             except Exception as exc:
                 logger.warning("constraints parse failed for %s: %s", sym, exc)
-        logger.info(
-            "event=market_constraints_loaded markets=%d constraints=%d recvWindow=%d timeout_ms=%d mode=LIVE",
-            len(self._client.markets or {}),
-            len(self._constraints_cache),
-            DEFAULT_RECV_WINDOW,
-            self._timeout_ms,
-        )
+        logger.info("event=market_constraints_loaded markets=%d recvWindow=%d timeout_ms=%d mode=LIVE",
+                    len(self._client.markets or {}), DEFAULT_RECV_WINDOW, self._timeout_ms)
 
     def close(self) -> None:
         if self._client is not None:
@@ -133,42 +107,26 @@ class TokocryptoClient:
     def fetch_ticker(self, symbol: str) -> Ticker:
         self.connect()
         t = self._client.fetch_ticker(symbol)
-        return Ticker(
-            symbol=symbol,
-            last=float(t["last"] or 0),
-            bid=float(t["bid"]) if t.get("bid") is not None else None,
-            ask=float(t["ask"]) if t.get("ask") is not None else None,
-            volume=float(t["baseVolume"]) if t.get("baseVolume") is not None else None,
-            timestamp_ms=int(t["timestamp"]) if t.get("timestamp") else None,
-        )
+        return Ticker(symbol=symbol, last=float(t["last"] or 0),
+                      bid=float(t["bid"]) if t.get("bid") is not None else None,
+                      ask=float(t["ask"]) if t.get("ask") is not None else None,
+                      volume=float(t["baseVolume"]) if t.get("baseVolume") is not None else None,
+                      timestamp_ms=int(t["timestamp"]) if t.get("timestamp") else None)
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 100) -> list[OHLCV]:
         self.connect()
         rows = self._client.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        return [
-            OHLCV(
-                timestamp_ms=int(r[0]),
-                open=float(r[1]),
-                high=float(r[2]),
-                low=float(r[3]),
-                close=float(r[4]),
-                volume=float(r[5]),
-            )
-            for r in rows
-        ]
+        return [OHLCV(timestamp_ms=int(r[0]), open=float(r[1]), high=float(r[2]), low=float(r[3]), close=float(r[4]), volume=float(r[5])) for r in rows]
 
     def resolve_symbol(self, base: str, quote: str) -> str | None:
         self.connect()
         base_u, quote_u = base.upper(), quote.upper()
-        candidates = [f"{base_u}/{quote_u}", f"{base_u}_{quote_u}", f"{base_u}{quote_u}"]
         markets = self._client.markets or {}
-        for c in candidates:
+        for c in (f"{base_u}/{quote_u}", f"{base_u}_{quote_u}", f"{base_u}{quote_u}"):
             if c in markets and markets[c].get("active", True) is not False:
                 return c
         for m, info in markets.items():
-            if not info.get("active", True):
-                continue
-            if str(info.get("base", "")).upper() == base_u and str(info.get("quote", "")).upper() == quote_u:
+            if info.get("active", True) and str(info.get("base", "")).upper() == base_u and str(info.get("quote", "")).upper() == quote_u:
                 return m
         return None
 
@@ -186,23 +144,11 @@ class TokocryptoClient:
     def supports_quote_order_qty(self) -> bool:
         return True
 
-    def create_order(
-        self,
-        symbol: str,
-        side: Side,
-        amount: float,
-        order_type: OrderType = OrderType.MARKET,
-        price: float | None = None,
-        client_order_id: str | None = None,
-        *,
-        quote_amount: float | None = None,
-    ) -> OrderResult:
+    def create_order(self, symbol: str, side: Side, amount: float, order_type: OrderType = OrderType.MARKET,
+                     price: float | None = None, client_order_id: str | None = None, *, quote_amount: float | None = None) -> OrderResult:
         self.connect()
         if self.circuit_open:
-            raise TokocryptoError(
-                f"circuit breaker open: {self.circuit_reason}",
-                category=ErrorCategory.CIRCUIT_BREAKER,
-            )
+            raise TokocryptoError(f"circuit breaker open: {self.circuit_reason}", category=ErrorCategory.CIRCUIT_BREAKER)
         params: dict[str, Any] = {}
         if client_order_id:
             params["clientOrderId"] = client_order_id
@@ -210,21 +156,14 @@ class TokocryptoClient:
         try:
             if order_type == OrderType.MARKET and side == Side.BUY and quote_amount is not None:
                 if not self.supports_quote_order_qty():
-                    raise TokocryptoError(
-                        "quoteOrderQty path not supported — fail closed for LIVE BUY",
-                        category=ErrorCategory.INVALID_REQUEST,
-                    )
+                    raise TokocryptoError("quoteOrderQty path not supported", category=ErrorCategory.INVALID_REQUEST)
                 params["quoteOrderQty"] = quote_amount
-                raw = self._client.create_order(
-                    symbol, "market", side.value, quote_amount, None, params
-                )
+                raw = self._client.create_order(symbol, "market", side.value, quote_amount, None, params)
             elif order_type == OrderType.MARKET:
                 raw = self._client.create_order(symbol, "market", side.value, amount, None, params)
             else:
                 if price is None:
-                    raise TokocryptoError(
-                        "limit order requires price", category=ErrorCategory.INVALID_REQUEST
-                    )
+                    raise TokocryptoError("limit order requires price", category=ErrorCategory.INVALID_REQUEST)
                 raw = self._client.create_order(symbol, "limit", side.value, amount, price, params)
         except TokocryptoError:
             raise
@@ -234,7 +173,73 @@ class TokocryptoClient:
                 self.open_circuit(str(exc)[:200])
             if cat == ErrorCategory.RATE_LIMIT:
                 self.trip_rate_limit()
-                logger.warning("event=rate_limit_detected detail=%s", type(exc).__name__)
-            raise TokocryptoError(
-                f"create_order failed: {exc}", category=cat, ambiguous=is_ambiguous(cat)
-            ) from exp
+            raise TokocryptoError(f"create_order failed: {exc}", category=cat, ambiguous=is_ambiguous(cat)) from exc
+        return self._parse_order_result(raw, symbol=symbol, side=side, order_type=order_type,
+                                        amount=amount, quote_amount=quote_amount, price=price,
+                                        client_order_id=client_order_id)
+
+    def _parse_order_result(self, raw: dict[str, Any], *, symbol: str, side: Side, order_type: OrderType,
+                            amount: float, quote_amount: float | None, price: float | None,
+                            client_order_id: str | None) -> OrderResult:
+        try:
+            v = validate_order_payload(raw, expected_client_order_id=client_order_id,
+                                       default_amount=amount or quote_amount or 0.0)
+        except InvalidOrderResponse as exc:
+            raise TokocryptoError(str(exc), category=ErrorCategory.INVALID_RESPONSE) from exc
+        return OrderResult(id=v.id, symbol=symbol, side=side, type=order_type, amount=float(v.amount),
+                           price=v.price if v.price is not None else price, status=v.status,
+                           filled=float(v.filled), remaining=float(v.remaining), average=v.average,
+                           client_order_id=v.client_order_id)
+
+    def find_order_by_client_id(self, symbol: str, client_order_id: str, *, lookback_limit: int = 50) -> dict[str, Any] | None:
+        self.connect()
+        for fetcher_name in ("fetch_open_orders", "fetch_closed_orders", "fetch_orders"):
+            if not hasattr(self._client, fetcher_name):
+                continue
+            try:
+                method = getattr(self._client, fetcher_name)
+                kwargs = {"limit": lookback_limit} if fetcher_name != "fetch_open_orders" else {}
+                orders = method(symbol, **kwargs) if fetcher_name != "fetch_open_orders" else method(symbol)
+                for o in orders or []:
+                    if self._match_client_id(o, client_order_id):
+                        return o
+            except Exception as exc:
+                logger.warning("%s during recon: %s", fetcher_name, exp)
+        return None
+
+    @staticmethod
+    def _match_client_id(order: dict[str, Any], client_order_id: str) -> bool:
+        if not client_order_id:
+            return False
+        for key in ("clientOrderId", "clientOrderID", "clientId", "client_id"):
+            val = order.get(key)
+            if val is not None and str(val) == client_order_id:
+                return True
+        info = order.get("info") or {}
+        if isinstance(info, dict):
+            for key in ("clientId", "clientOrderId", "client_id"):
+                val = info.get(key)
+                if val is not None and str(val) == client_order_id:
+                    return True
+        return False
+
+    def fetch_open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        self.connect()
+        return list(self._client.fetch_open_orders(symbol) or [])
+
+    def server_time_ms(self) -> int:
+        self.connect()
+        try:
+            return int(self._client.fetch_time())
+        except Exception:
+            return int(time.time() * 1000)
+
+    def validate_symbol_ready(self, symbol: str) -> tuple[bool, str]:
+        c = self.get_constraints(symbol)
+        if c is None:
+            return False, "market metadata missing"
+        if not c.active:
+            return False, "market not active"
+        if c.get_step_size() is None and c.amount_precision is None:
+            return False, "no amount step/precision available"
+        return True, "ok"
