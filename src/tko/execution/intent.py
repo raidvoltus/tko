@@ -26,18 +26,18 @@ class OrderIntentStatus(str, Enum):
     REJECTED = "REJECTED"
     UNKNOWN = "UNKNOWN"
     RECONCILIATION = "RECONCILIATION"
-    RETRY_ELIGIBLE = "RETRY_ELIGIBLE"  # legacy only — always treated as blocking
-    MANUAL_REVIEW = "MANUAL_REVIEW"
+    RETRY_ELIGIBLE = "RETRY_ELIGIBLE"  # legacy only — always blocking
+    MANUAL_REVIEW = "MANUAL_REVIEW"  # legacy → maps to GOVERNOR_AUTONOMOUS
+    GOVERNOR_AUTONOMOUS = "GOVERNOR_AUTONOMOUS"
     FAILED = "FAILED"
 
 
-# Statuses that MUST block a new POST for the same symbol+side.
-# RETRY_ELIGIBLE is deprecated for automatic trading; kept for persisted state, still blocking.
 BLOCKS_DUPLICATE = frozenset(
     {
         OrderIntentStatus.SUBMITTING,
         OrderIntentStatus.UNKNOWN,
         OrderIntentStatus.RECONCILIATION,
+        OrderIntentStatus.GOVERNOR_AUTONOMOUS,
         OrderIntentStatus.MANUAL_REVIEW,
         OrderIntentStatus.RETRY_ELIGIBLE,
         OrderIntentStatus.NORMALIZED,
@@ -89,6 +89,8 @@ class OrderIntent:
             status = OrderIntentStatus(st)
         except ValueError:
             status = OrderIntentStatus.FAILED
+        if status == OrderIntentStatus.MANUAL_REVIEW:
+            status = OrderIntentStatus.GOVERNOR_AUTONOMOUS
         return cls(
             intent_id=str(data.get("intent_id") or uuid.uuid4().hex),
             client_order_id=str(data.get("client_order_id") or ""),
@@ -152,6 +154,58 @@ class IntentStore:
         reason: str = "",
         strategy: str = "btc",
     ) -> OrderIntent:
+        with self._lock:
+            return self._create_unlocked(
+                symbol=symbol,
+                side=side,
+                base_amount=base_amount,
+                quote_amount=quote_amount,
+                last_price=last_price,
+                reason=reason,
+                strategy=strategy,
+            )
+
+    def create_if_absent(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        base_amount: float = 0.0,
+        quote_amount: float = 0.0,
+        last_price: float = 0.0,
+        reason: str = "",
+        strategy: str = "btc",
+    ) -> OrderIntent | None:
+        """Atomic check+create under lock. None if blocking intent exists (INV-19)."""
+        with self._lock:
+            for intent in self._items.values():
+                if (
+                    intent.symbol == symbol
+                    and intent.side == side
+                    and intent.status in BLOCKS_DUPLICATE
+                ):
+                    return None
+            return self._create_unlocked(
+                symbol=symbol,
+                side=side,
+                base_amount=base_amount,
+                quote_amount=quote_amount,
+                last_price=last_price,
+                reason=reason,
+                strategy=strategy,
+            )
+
+    def _create_unlocked(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        base_amount: float = 0.0,
+        quote_amount: float = 0.0,
+        last_price: float = 0.0,
+        reason: str = "",
+        strategy: str = "btc",
+    ) -> OrderIntent:
         cid = generate_client_order_id(side, symbol, strategy)
         intent = OrderIntent(
             intent_id=uuid.uuid4().hex,
@@ -165,9 +219,8 @@ class IntentStore:
             reason=reason,
             strategy=strategy,
         )
-        with self._lock:
-            self._items[cid] = intent
-            self._save()
+        self._items[cid] = intent
+        self._save()
         return intent
 
     def update(self, intent: OrderIntent) -> None:
@@ -196,9 +249,5 @@ class IntentStore:
             return [
                 i
                 for i in self._items.values()
-                if i.status
-                in (
-                    OrderIntentStatus.UNKNOWN,
-                    OrderIntentStatus.RECONCILIATION,
-                )
+                if i.status in (OrderIntentStatus.UNKNOWN, OrderIntentStatus.RECONCILIATION)
             ]

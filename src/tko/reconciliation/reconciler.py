@@ -1,4 +1,4 @@
-"""Reconcile UNKNOWN intents and position store vs exchange balances."""
+"""Single reconciliation authority for UNKNOWN/RECONCILIATION intents."""
 
 from __future__ import annotations
 
@@ -7,39 +7,131 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from tko.audit.audit_log import AuditLog
+from tko.exchange.order_response import InvalidOrderResponse, validate_order_payload
 from tko.execution.intent import IntentStore, OrderIntent, OrderIntentStatus
 from tko.risk.position_store import PositionStore
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_RECON_MISSES = 5
 
 
 @dataclass
 class ReconcileResult:
     intents_checked: int = 0
     intents_confirmed: int = 0
-    intents_manual_review: int = 0
+    intents_governor: int = 0
+    intents_still_reconciling: int = 0
     positions_adjusted: int = 0
     notes: list[str] = field(default_factory=list)
 
 
 class Reconciler:
+    """Sole lifecycle authority for ambiguous order recovery (INV-16)."""
+
     def __init__(
         self,
         *,
         client: Any,
         intents: IntentStore,
-        positions: PositionStore,
+        positions: PositionStore | None = None,
         audit: AuditLog | None = None,
-        max_unknown_checks: int = 5,
+        max_unknown_checks: int = DEFAULT_MAX_RECON_MISSES,
         min_dust: float = 1e-8,
     ) -> None:
         self.client = client
         self.intents = intents
         self.positions = positions
         self.audit = audit
-        self.max_unknown_checks = max_unknown_checks
+        self.max_unknown_checks = max(1, int(max_unknown_checks))
         self.min_dust = min_dust
-        self._unknown_hits: dict[str, int] = {}
+
+    def reconcile_intent(
+        self,
+        intent: OrderIntent,
+        *,
+        on_confirmed: Callable[[OrderIntent], None] | None = None,
+    ) -> OrderIntent:
+        intent.status = OrderIntentStatus.RECONCILIATION
+        self.intents.update(intent)
+
+        cid = intent.client_order_id or ""
+        found = None
+        query_failed = False
+        try:
+            found = self.client.find_order_by_client_id(intent.symbol, cid)
+        except Exception as exc:
+            query_failed = True
+            intent.error_category = "RECON_QUERY_FAILED"
+            intent.error_message = str(exc)[:300]
+            self.intents.update(intent)
+            logger.warning("event=reconcile_query_failed cid=%s err=%s", cid, exc)
+            return intent
+
+        if found is not None:
+            try:
+                validated = validate_order_payload(
+                    found,
+                    expected_client_order_id=cid,
+                    require_client_id_match=False,
+                )
+            except InvalidOrderResponse as exc:
+                intent.error_category = "INVALID_RESPONSE"
+                intent.error_message = str(exc)[:300]
+                self.intents.update(intent)
+                logger.warning("event=reconcile_invalid_response cid=%s err=%s", cid, exc)
+                return intent
+
+            intent.status = OrderIntentStatus.CONFIRMED
+            intent.exchange_order_id = validated.id
+            intent.filled = validated.filled
+            intent.average = validated.average if validated.average is not None else validated.price
+            intent.error_category = ""
+            intent.error_message = ""
+            self.intents.update(intent)
+            if self.audit:
+                self.audit.record(
+                    "RECONCILE_RESULT",
+                    symbol=intent.symbol,
+                    side=intent.side,
+                    client_order_id=cid,
+                    exchange_order_id=intent.exchange_order_id,
+                    reason="confirmed",
+                    quantity=intent.filled,
+                    price=intent.average,
+                )
+            if on_confirmed:
+                try:
+                    on_confirmed(intent)
+                except Exception as exc:
+                    logger.warning("on_confirmed hook failed: %s", exc)
+            return intent
+
+        if not query_failed:
+            intent.attempts = int(intent.attempts or 0) + 1
+            if intent.attempts >= self.max_unknown_checks:
+                intent.status = OrderIntentStatus.GOVERNOR_AUTONOMOUS
+                intent.error_category = "ORDER_NOT_FOUND"
+                intent.error_message = f"not found after {intent.attempts} successful lookups"
+                self.intents.update(intent)
+                logger.critical(
+                    "event=order_governor_autonomous cid=%s attempts=%d",
+                    cid,
+                    intent.attempts,
+                )
+                if self.audit:
+                    self.audit.record(
+                        "RECONCILE_RESULT",
+                        symbol=intent.symbol,
+                        side=intent.side,
+                        client_order_id=cid,
+                        reason=f"governor_after_{intent.attempts}",
+                    )
+                return intent
+
+            intent.status = OrderIntentStatus.RECONCILIATION
+            self.intents.update(intent)
+        return intent
 
     def reconcile_all(
         self,
@@ -50,79 +142,27 @@ class Reconciler:
         result = ReconcileResult()
         for intent in list(self.intents.unresolved_unknown()):
             result.intents_checked += 1
-            cid = intent.client_order_id or ""
-            found = None
-            try:
-                found = self.client.find_order_by_client_id(intent.symbol, cid)
-            except Exception as exc:
-                logger.warning("reconcile find_order failed %s: %s", cid, exc)
-            if found:
-                intent.status = OrderIntentStatus.CONFIRMED
-                intent.exchange_order_id = str(found.get("id") or "")
-                intent.filled = float(found.get("filled") or 0)
-                avg = found.get("average") or found.get("price")
-                intent.average = float(avg) if avg is not None else None
-                self.intents.update(intent)
+            updated = self.reconcile_intent(intent, on_confirmed=on_confirmed)
+            if updated.status == OrderIntentStatus.CONFIRMED:
                 result.intents_confirmed += 1
-                result.notes.append(f"confirmed {cid}")
-                self._unknown_hits.pop(cid, None)
-                if self.audit:
-                    self.audit.record(
-                        "RECONCILE_RESULT",
-                        symbol=intent.symbol,
-                        side=intent.side,
-                        client_order_id=cid,
-                        exchange_order_id=intent.exchange_order_id,
-                        reason="confirmed",
-                        quantity=intent.filled,
-                        price=intent.average,
-                    )
-                if on_confirmed:
-                    try:
-                        on_confirmed(intent)
-                    except Exception as exc:
-                        logger.warning("on_confirmed hook failed: %s", exc)
-                continue
-
-            hits = self._unknown_hits.get(cid, 0) + 1
-            self._unknown_hits[cid] = hits
-            if hits >= self.max_unknown_checks:
-                intent.status = OrderIntentStatus.MANUAL_REVIEW
-                self.intents.update(intent)
-                result.intents_manual_review += 1
-                result.notes.append(f"manual_review {cid} after {hits} checks")
-                if self.audit:
-                    self.audit.record(
-                        "RECONCILE_RESULT",
-                        symbol=intent.symbol,
-                        side=intent.side,
-                        client_order_id=cid,
-                        reason=f"not_found_after_{hits}",
-                    )
+                result.notes.append(f"confirmed {updated.client_order_id}")
+            elif updated.status == OrderIntentStatus.GOVERNOR_AUTONOMOUS:
+                result.intents_governor += 1
+                result.notes.append(f"governor {updated.client_order_id}")
             else:
-                intent.status = OrderIntentStatus.RECONCILIATION
-                self.intents.update(intent)
-                result.notes.append(f"still_unknown {cid} checks={hits}")
+                result.intents_still_reconciling += 1
+                result.notes.append(f"reconciling {updated.client_order_id}")
 
-        if free_map is not None:
+        if free_map is not None and self.positions is not None:
             notes = self.positions.reconcile_with_balances(free_map, min_dust=self.min_dust)
             result.positions_adjusted = len(notes)
             result.notes.extend(notes)
-            if notes and self.audit:
-                self.audit.record(
-                    "RECONCILE_RESULT",
-                    reason="position_balance_mismatch",
-                    extra={"notes": notes},
-                )
-
-        if self.audit and result.intents_checked == 0 and result.positions_adjusted == 0:
-            self.audit.record("RECONCILE_RESULT", reason="noop")
 
         logger.info(
-            "event=reconcile_done checked=%d confirmed=%d manual=%d pos_adj=%d",
+            "event=reconcile_done checked=%d confirmed=%d governor=%d still=%d",
             result.intents_checked,
             result.intents_confirmed,
-            result.intents_manual_review,
-            result.positions_adjusted,
+            result.intents_governor,
+            result.intents_still_reconciling,
         )
         return result
