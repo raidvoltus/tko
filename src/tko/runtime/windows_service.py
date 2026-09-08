@@ -1,4 +1,4 @@
-"""Windows scheduled-task helpers for portable TKO .exe (schtasks only)."""
+"""Windows Task Scheduler install/uninstall helpers for portable TKO."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_TASK_NAME = "TkoBot"
 SCHTASKS = "schtasks"
+DEFAULT_TASK_NAME = "TKO-LiveBot"
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,12 +21,17 @@ class ServicePlan:
 
 
 def resolve_exe_and_workdir() -> tuple[Path, Path]:
-    exe = Path(sys.executable).resolve()
-    return exe, exe.parent
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable).resolve()
+        work = exe.parent
+    else:
+        exe = Path(sys.executable).resolve()
+        work = Path.cwd().resolve()
+    return exe, work
 
 
-def build_task_command_line(exe: Path, work_dir: Path) -> str:
-    return f'cmd.exe /c cd /d "{work_dir}" && "{exe}" run'
+def build_task_command_line(exe: Path, work: Path) -> str:
+    return f'"{exe}" run --state-dir "{work / "state"}"'
 
 
 def build_service_plan(task_name: str = DEFAULT_TASK_NAME) -> ServicePlan:
@@ -120,65 +125,31 @@ def install_scheduled_task(
     if not plan.exe_path.exists():
         return ServiceResult(False, f"Executable tidak ditemukan: {plan.exe_path}")
     if create_portable_marker:
-        try:
-            ensure_portable_marker(plan.work_dir)
-        except OSError as exc:
-            return ServiceResult(False, f"Gagal membuat marker .portable: {exc}")
-    exists = task_exists(plan.task_name)
-    if exists and not force:
-        return ServiceResult(
-            False,
-            f"Task '{plan.task_name}' sudah ada. Gunakan --force atau uninstall-service.",
-        )
-    args = schtasks_create_args(plan, force=force or exists, use_system=use_system)
-    try:
-        proc = run_schtasks(args)
-    except subprocess.TimeoutExpired:
-        return ServiceResult(False, "schtasks timeout")
-    except OSError as exc:
-        return ServiceResult(False, f"Gagal menjalankan schtasks: {exc}")
-    combined = "\n".join(
-        x for x in ((proc.stdout or "").strip(), (proc.stderr or "").strip()) if x
-    )
-    if proc.returncode != 0:
-        lower = combined.lower()
-        if "access" in lower and "denied" in lower:
-            return ServiceResult(
-                False, "Akses ditolak. Jalankan sebagai Administrator.", combined
-            )
-        return ServiceResult(False, f"schtasks gagal (kode {proc.returncode}).", combined)
-    account = "SYSTEM" if use_system else getpass.getuser()
-    lines = [
-        f"Scheduled task '{plan.task_name}' berhasil dibuat.",
-        f"  Exe     : {plan.exe_path}",
-        f"  Workdir : {plan.work_dir}",
-        f"  Trigger : ONSTART",
-        f"  Account : {account}",
-        "",
-        "Peringatan: path absolut tersimpan. Jika exe dipindah, install ulang.",
-    ]
-    if use_system:
-        lines += ["", "PERINGATAN KEAMANAN (/RU SYSTEM):", f"  {system_acl_hint(plan.work_dir)}"]
-    else:
-        lines += [
-            "",
-            "Tanpa password, task biasanya jalan saat user logon. Untuk tanpa logon: --use-system.",
-        ]
-    return ServiceResult(True, "\n".join(lines) + "\n", combined)
+        ensure_portable_marker(plan.work_dir)
+    if task_exists(plan.task_name) and not force:
+        return ServiceResult(False, f"Task sudah ada: {plan.task_name}. Gunakan --force.")
+    result = run_schtasks(schtasks_create_args(plan, force=force, use_system=use_system))
+    if result.returncode != 0:
+        return ServiceResult(False, "schtasks /Create gagal", detail=(result.stderr or result.stdout or "")[:500])
+    return ServiceResult(True, f"Task terpasang: {plan.task_name}", detail=restart_policy_notes())
 
 
 def uninstall_scheduled_task(task_name: str = DEFAULT_TASK_NAME) -> ServiceResult:
     if sys.platform != "win32":
-        return ServiceResult(False, "uninstall-service hanya didukung di Windows (schtasks).")
-    name = task_name.strip() or DEFAULT_TASK_NAME
-    if not task_exists(name):
-        return ServiceResult(False, f"Task '{name}' tidak ditemukan.")
-    try:
-        proc = run_schtasks(schtasks_delete_args(name, force=True))
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        return ServiceResult(False, str(exc))
-    if proc.returncode != 0:
-        return ServiceResult(
-            False, f"schtasks gagal menghapus (kode {proc.returncode}).", (proc.stderr or "")
-        )
-    return ServiceResult(True, f"Scheduled task '{name}' berhasil dihapus.")
+        return ServiceResult(False, "uninstall-service hanya didukung di Windows.")
+    if not task_exists(task_name):
+        return ServiceResult(True, f"Task tidak ada (noop): {task_name}")
+    result = run_schtasks(schtasks_delete_args(task_name))
+    if result.returncode != 0:
+        return ServiceResult(False, "schtasks /Delete gagal", detail=(result.stderr or result.stdout or "")[:500])
+    return ServiceResult(True, f"Task dihapus: {task_name}")
+
+
+def restart_policy_notes() -> str:
+    """Document safe Windows Task Scheduler recovery policy (Stage 4)."""
+    return (
+        "MultipleInstancesPolicy=IgnoreNew (never parallel LIVE instances). "
+        "RestartOnFailure: bounded count (e.g. 3) with interval >= 60s. "
+        "Every restart must pass application startup reconciliation barrier. "
+        "InstanceLock is the secondary hard gate against dual READY."
+    )
