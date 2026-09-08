@@ -1,36 +1,35 @@
-"""Exchange / execution error classification."""
+"""Exchange/execution error classification for safe retry policy."""
 
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
 
 
 class ErrorCategory(str, Enum):
-    DEFINITIVE_REJECTED = "DEFINITIVE_REJECTED"
     AUTH_ERROR = "AUTH_ERROR"
-    INVALID_REQUEST = "INVALID_REQUEST"
     RATE_LIMIT = "RATE_LIMIT"
-    TEMPORARY_NETWORK_ERROR = "TEMPORARY_NETWORK_ERROR"
-    TIMEOUT = "TIMEOUT"
-    AMBIGUOUS_EXECUTION = "AMBIGUOUS_EXECUTION"
-    EXCHANGE_5XX = "EXCHANGE_5XX"
-    UNKNOWN_ERROR = "UNKNOWN_ERROR"
     CIRCUIT_BREAKER = "CIRCUIT_BREAKER"
+    TIMEOUT = "TIMEOUT"
+    TEMPORARY_NETWORK_ERROR = "TEMPORARY_NETWORK_ERROR"
+    EXCHANGE_5XX = "EXCHANGE_5XX"
+    DEFINITIVE_REJECTED = "DEFINITIVE_REJECTED"
+    INVALID_REQUEST = "INVALID_REQUEST"
+    INVALID_RESPONSE = "INVALID_RESPONSE"
+    UNKNOWN_ERROR = "UNKNOWN_ERROR"
 
 
 AMBIGUOUS_CATEGORIES = frozenset(
     {
         ErrorCategory.TIMEOUT,
         ErrorCategory.TEMPORARY_NETWORK_ERROR,
-        ErrorCategory.AMBIGUOUS_EXECUTION,
         ErrorCategory.EXCHANGE_5XX,
+        ErrorCategory.UNKNOWN_ERROR,
     }
 )
 
 
 def classify_exception(exc: BaseException) -> ErrorCategory:
-    """Map exception / CCXT error to a category."""
+    """Map an exception to a category."""
     name = type(exc).__name__.lower()
     msg = str(exc).lower()
 

@@ -26,16 +26,20 @@ class OrderIntentStatus(str, Enum):
     REJECTED = "REJECTED"
     UNKNOWN = "UNKNOWN"
     RECONCILIATION = "RECONCILIATION"
-    RETRY_ELIGIBLE = "RETRY_ELIGIBLE"
+    RETRY_ELIGIBLE = "RETRY_ELIGIBLE"  # legacy only — always treated as blocking
     MANUAL_REVIEW = "MANUAL_REVIEW"
     FAILED = "FAILED"
 
 
+# Statuses that MUST block a new POST for the same symbol+side.
+# RETRY_ELIGIBLE is deprecated for automatic trading; kept for persisted state, still blocking.
 BLOCKS_DUPLICATE = frozenset(
     {
         OrderIntentStatus.SUBMITTING,
         OrderIntentStatus.UNKNOWN,
         OrderIntentStatus.RECONCILIATION,
+        OrderIntentStatus.MANUAL_REVIEW,
+        OrderIntentStatus.RETRY_ELIGIBLE,
         OrderIntentStatus.NORMALIZED,
         OrderIntentStatus.PRE_TRADE_VALIDATION,
         OrderIntentStatus.PERSISTED,
@@ -179,13 +183,22 @@ class IntentStore:
     def has_blocking_intent(self, symbol: str, side: str) -> bool:
         with self._lock:
             for intent in self._items.values():
-                if intent.symbol == symbol and intent.side == side and intent.status in BLOCKS_DUPLICATE:
+                if (
+                    intent.symbol == symbol
+                    and intent.side == side
+                    and intent.status in BLOCKS_DUPLICATE
+                ):
                     return True
         return False
 
     def unresolved_unknown(self) -> list[OrderIntent]:
         with self._lock:
             return [
-                i for i in self._items.values()
-                if i.status in (OrderIntentStatus.UNKNOWN, OrderIntentStatus.RECONCILIATION)
+                i
+                for i in self._items.values()
+                if i.status
+                in (
+                    OrderIntentStatus.UNKNOWN,
+                    OrderIntentStatus.RECONCILIATION,
+                )
             ]
