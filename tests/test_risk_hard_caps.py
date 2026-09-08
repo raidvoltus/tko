@@ -23,7 +23,12 @@ def test_max_order_notional_caps_size(tmp_path: Path):
 
 
 def test_max_daily_notional_blocks(tmp_path: Path):
-    s = Settings(max_order_notional=5_000_000, max_daily_notional=1_000_000, min_quote_balance=1, max_position_pct=50)
+    s = Settings(
+        max_order_notional=500_000,
+        max_daily_notional=1_000_000,
+        min_quote_balance=1,
+        max_position_pct=50,
+    )
     pnl = DailyPnLTracker(tmp_path / "pnl.jsonl", timezone_name="UTC")
     pnl.record_trade(side="buy", symbol="BTC/IDR", notional=1_000_000, pnl=0)
     risk = RiskEngine(s, tmp_path, pnl)

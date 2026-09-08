@@ -27,14 +27,31 @@ class TokocryptoCredentials:
     def validate(self) -> None:
         k = self.api_key.get_secret_value()
         s = self.api_secret.get_secret_value()
-        if len(k) < 8 or len(s) < 8:
+        if not isinstance(k, str) or not isinstance(s, str):
+            raise CredentialError("API key/secret must be strings")
+        if len(k.strip()) < 8 or len(s.strip()) < 8:
             raise CredentialError("API key/secret too short")
+        if k != k.strip() or s != s.strip():
+            raise CredentialError("API key/secret must not have leading/trailing whitespace")
+        lowered = (k + s).lower()
+        for bad in ("changeme", "your_api", "xxx", "placeholder", "test_key"):
+            if bad in lowered:
+                raise CredentialError("API key/secret looks like a placeholder")
 
 
 @dataclass(frozen=True, slots=True)
 class TelegramCredentials:
     bot_token: SecretStr
     chat_id: str
+
+    def validate(self) -> None:
+        token = self.bot_token.get_secret_value()
+        if not token or len(token.strip()) < 10:
+            raise CredentialError("Telegram bot token too short")
+        if ":" not in token:
+            raise CredentialError("Telegram bot token format invalid")
+        if not str(self.chat_id).strip():
+            raise CredentialError("Telegram chat_id empty")
 
 
 def _state_root() -> Path:
@@ -98,9 +115,17 @@ def load_tokocrypto() -> TokocryptoCredentials:
             raw = keyring.get_password("TKO:tokocrypto", "default")
             if raw:
                 data = json.loads(raw)
-                return TokocryptoCredentials(
-                    SecretStr(data["api_key"]), SecretStr(data["api_secret"])
-                )
+                if not isinstance(data, dict):
+                    raise CredentialError("Keyring payload is not a JSON object")
+                key = data.get("api_key")
+                secret = data.get("api_secret")
+                if not key or not secret:
+                    raise CredentialError("Keyring payload missing api_key or api_secret")
+                creds = TokocryptoCredentials(SecretStr(str(key)), SecretStr(str(secret)))
+                creds.validate()  # S2-07: validate on load
+                return creds
+        except CredentialError:
+            raise
         except Exception as exc:
             raise CredentialError(f"Gagal membaca keyring: {exc}") from exc
 
@@ -118,10 +143,17 @@ def load_tokocrypto() -> TokocryptoCredentials:
 
 
 def save_telegram(token: str, chat_id: str) -> None:
+    creds = TelegramCredentials(SecretStr(token.strip()), str(chat_id).strip())
+    creds.validate()
     _require_keyring()
     import keyring
 
-    payload = json.dumps({"bot_token": token.strip(), "chat_id": str(chat_id).strip()})
+    payload = json.dumps(
+        {
+            "bot_token": creds.bot_token.get_secret_value(),
+            "chat_id": creds.chat_id,
+        }
+    )
     keyring.set_password("TKO:telegram", "default", payload)
     legacy = _legacy_tg_file()
     if legacy.exists():
@@ -132,6 +164,7 @@ def save_telegram(token: str, chat_id: str) -> None:
 
 
 def load_telegram() -> TelegramCredentials | None:
+    """Load Telegram creds. Returns None if unset; raises CredentialError if corrupt."""
     if not _keyring_available():
         return None
     try:
@@ -141,6 +174,13 @@ def load_telegram() -> TelegramCredentials | None:
         if not raw:
             return None
         data = json.loads(raw)
-        return TelegramCredentials(SecretStr(data["bot_token"]), str(data["chat_id"]))
+        creds = TelegramCredentials(
+            SecretStr(str(data["bot_token"])),
+            str(data["chat_id"]),
+        )
+        creds.validate()
+        return creds
+    except CredentialError:
+        raise
     except Exception:
         return None
