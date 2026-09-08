@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
 from getpass import getpass
 
@@ -55,21 +56,42 @@ def cmd_setup(_: argparse.Namespace) -> int:
 def cmd_run(_: argparse.Namespace) -> int:
     settings = load_settings()
     _setup_logging(settings.log_level)
+
+    from tko.runtime.instance_lock import InstanceLock, InstanceLockError
+
+    lock = InstanceLock(state_dir() / "tko.lock")
     try:
-        load_tokocrypto()
-    except CredentialNotFoundError as exc:
+        lock.acquire()
+    except InstanceLockError as exc:
         print(exc)
         return 1
-    from tko.runtime.bot import TradingBot
 
-    bot = TradingBot(settings, state_dir())
-    print("Starting TKO LIVE bot (Ctrl+C to stop)...")
+    def _release_and_exit(signum: int, frame: object) -> None:
+        lock.release()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT, _release_and_exit)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _release_and_exit)
+
     try:
-        bot.start()
-    except KeyboardInterrupt:
-        bot.stop()
-        print("\nStopped.")
-    return 0
+        try:
+            load_tokocrypto()
+        except CredentialNotFoundError as exc:
+            print(exc)
+            return 1
+        from tko.runtime.bot import TradingBot
+
+        bot = TradingBot(settings, state_dir())
+        print("Starting TKO LIVE bot (Ctrl+C to stop)...")
+        try:
+            bot.start()
+        except KeyboardInterrupt:
+            bot.stop()
+            print("\nStopped.")
+        return 0
+    finally:
+        lock.release()
 
 
 def cmd_status(_: argparse.Namespace) -> int:
@@ -102,19 +124,19 @@ def cmd_stop(_: argparse.Namespace) -> int:
 
     settings = load_settings()
     risk = RiskEngine(settings, state_dir())
-    risk.activate_kill_switch()
+    risk.activate_kill_switch("cli stop")
     print("Kill switch activated. Bot will stop opening new positions.")
     return 0
 
 
 def cmd_install_service(args: argparse.Namespace) -> int:
-    """Register Windows scheduled task (ONSTART, SYSTEM) for portable .exe."""
     from tko.runtime.windows_service import DEFAULT_TASK_NAME, install_scheduled_task
 
     task_name = getattr(args, "task_name", None) or DEFAULT_TASK_NAME
     force = bool(getattr(args, "force", False))
+    use_system = bool(getattr(args, "use_system", False))
 
-    result = install_scheduled_task(task_name, force=force)
+    result = install_scheduled_task(task_name, force=force, use_system=use_system)
     print(result.message)
     if result.detail and not result.ok:
         print(result.detail)
@@ -122,7 +144,6 @@ def cmd_install_service(args: argparse.Namespace) -> int:
 
 
 def cmd_uninstall_service(args: argparse.Namespace) -> int:
-    """Remove Windows scheduled task created by install-service."""
     from tko.runtime.windows_service import DEFAULT_TASK_NAME, uninstall_scheduled_task
 
     task_name = getattr(args, "task_name", None) or DEFAULT_TASK_NAME
@@ -153,29 +174,15 @@ def main(argv: list[str] | None = None) -> int:
 
     p_install = sub.add_parser(
         "install-service",
-        help="Install Windows scheduled task (ONSTART, run as SYSTEM)",
+        help="Install Windows scheduled task (ONSTART)",
     )
-    p_install.add_argument(
-        "--task-name",
-        default="TkoBot",
-        help="Scheduled task name (default: TkoBot)",
-    )
-    p_install.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite existing task without extra prompt",
-    )
+    p_install.add_argument("--task-name", default="TkoBot", help="Scheduled task name (default: TkoBot)")
+    p_install.add_argument("--force", action="store_true", help="Overwrite existing task")
+    p_install.add_argument("--use-system", action="store_true", help="Run as SYSTEM (opt-in)")
     p_install.set_defaults(func=cmd_install_service)
 
-    p_uninstall = sub.add_parser(
-        "uninstall-service",
-        help="Remove Windows scheduled task",
-    )
-    p_uninstall.add_argument(
-        "--task-name",
-        default="TkoBot",
-        help="Scheduled task name (default: TkoBot)",
-    )
+    p_uninstall = sub.add_parser("uninstall-service", help="Remove Windows scheduled task")
+    p_uninstall.add_argument("--task-name", default="TkoBot", help="Scheduled task name")
     p_uninstall.set_defaults(func=cmd_uninstall_service)
 
     args = parser.parse_args(argv)
