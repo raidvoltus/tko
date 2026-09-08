@@ -62,14 +62,7 @@ def cmd_setup(_: argparse.Namespace) -> int:
 
 
 def cmd_run(_: argparse.Namespace) -> int:
-    """Fail-closed startup barrier before any trading runtime.
-
-    Order (S2-10):
-      1. load + validate settings (bounds, LIVE gate)
-      2. validate credentials
-      3. acquire instance lock
-      4. construct TradingBot
-    """
+    """Fail-closed startup barrier before any trading runtime."""
     try:
         settings = load_settings()
         settings.validate_for_live()
@@ -101,26 +94,49 @@ def cmd_run(_: argparse.Namespace) -> int:
         print(exc)
         return 1
 
-    def _release_and_exit(signum: int, frame: object) -> None:
-        lock.release()
+    bot_ref: dict = {"bot": None}
+
+    def _on_signal(signum: int, frame: object) -> None:
+        bot = bot_ref.get("bot")
+        if bot is not None:
+            try:
+                if hasattr(bot, "lifecycle") and hasattr(bot.lifecycle, "request_stop"):
+                    bot.lifecycle.request_stop()
+                bot._stop_requested = True
+                bot._running = False
+            except Exception:
+                pass
         raise SystemExit(0)
 
-    signal.signal(signal.SIGINT, _release_and_exit)
+    signal.signal(signal.SIGINT, _on_signal)
     if hasattr(signal, "SIGTERM"):
-        signal.signal(signal.SIGTERM, _release_and_exit)
+        signal.signal(signal.SIGTERM, _on_signal)
 
     try:
         from tko.runtime.bot import TradingBot
 
         bot = TradingBot(settings, state_dir())
+        bot_ref["bot"] = bot
         print("Starting TKO LIVE bot (Ctrl+C to stop)...")
         try:
             bot.start()
         except KeyboardInterrupt:
             bot.stop()
             print("\nStopped.")
+        except SystemExit:
+            try:
+                bot.stop()
+            except Exception:
+                pass
+            raise
         return 0
     finally:
+        bot = bot_ref.get("bot")
+        if bot is not None:
+            try:
+                bot.stop()
+            except Exception:
+                pass
         lock.release()
 
 
