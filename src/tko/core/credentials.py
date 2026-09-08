@@ -1,4 +1,4 @@
-"""Secure credential storage for Tokocrypto API + Telegram."""
+"""Secure credential storage — keyring primary, fail-closed (no plaintext fallback)."""
 
 from __future__ import annotations
 
@@ -44,43 +44,54 @@ def _state_root() -> Path:
     return Path.home() / ".tko"
 
 
-def _cred_file() -> Path:
-    d = _state_root() / "credentials"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / "tokocrypto.json"
+def _legacy_cred_file() -> Path:
+    return _state_root() / "credentials" / "tokocrypto.json"
+
+
+def _legacy_tg_file() -> Path:
+    return _state_root() / "credentials" / "telegram.json"
+
+
+def _keyring_available() -> bool:
+    try:
+        import keyring  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _require_keyring() -> None:
+    if not _keyring_available():
+        raise CredentialError(
+            "Keyring tidak tersedia. Instal paket 'keyring' dan pastikan backend OS aktif. "
+            "Fallback file plaintext telah dinonaktifkan (fail-closed)."
+        )
 
 
 def save_tokocrypto(api_key: str, api_secret: str) -> None:
     creds = TokocryptoCredentials(SecretStr(api_key.strip()), SecretStr(api_secret.strip()))
     creds.validate()
-    if sys.platform == "win32":
-        try:
-            import keyring
+    _require_keyring()
+    import keyring
 
-            payload = json.dumps(
-                {
-                    "api_key": creds.api_key.get_secret_value(),
-                    "api_secret": creds.api_secret.get_secret_value(),
-                }
-            )
-            keyring.set_password("TKO:tokocrypto", "default", payload)
-            return
-        except Exception:
+    payload = json.dumps(
+        {
+            "api_key": creds.api_key.get_secret_value(),
+            "api_secret": creds.api_secret.get_secret_value(),
+        }
+    )
+    keyring.set_password("TKO:tokocrypto", "default", payload)
+    legacy = _legacy_cred_file()
+    if legacy.exists():
+        try:
+            legacy.unlink()
+        except OSError:
             pass
-    path = _cred_file()
-    data = {
-        "api_key": creds.api_key.get_secret_value(),
-        "api_secret": creds.api_secret.get_secret_value(),
-    }
-    path.write_text(json.dumps(data), encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
 
 
 def load_tokocrypto() -> TokocryptoCredentials:
-    if sys.platform == "win32":
+    if _keyring_available():
         try:
             import keyring
 
@@ -90,37 +101,46 @@ def load_tokocrypto() -> TokocryptoCredentials:
                 return TokocryptoCredentials(
                     SecretStr(data["api_key"]), SecretStr(data["api_secret"])
                 )
-        except Exception:
-            pass
-    path = _cred_file()
-    if not path.exists():
-        raise CredentialNotFoundError(
-            "Tokocrypto credentials not found. Run: python -m tko setup"
+        except Exception as exc:
+            raise CredentialError(f"Gagal membaca keyring: {exc}") from exc
+
+    legacy = _legacy_cred_file()
+    if legacy.exists():
+        raise CredentialError(
+            f"Ditemukan kredensial plaintext lama di {legacy}. "
+            "Fallback plaintext dinonaktifkan. Jalankan 'tko setup' interaktif untuk migrasi ke keyring, "
+            "lalu hapus file tersebut."
         )
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return TokocryptoCredentials(SecretStr(data["api_key"]), SecretStr(data["api_secret"]))
 
-
-def save_telegram(bot_token: str, chat_id: str) -> None:
-    path = _state_root() / "credentials" / "telegram.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"bot_token": bot_token.strip(), "chat_id": str(chat_id).strip()}),
-        encoding="utf-8",
+    raise CredentialNotFoundError(
+        "Tokocrypto credentials tidak ditemukan di keyring. Jalankan: tko setup"
     )
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+
+
+def save_telegram(token: str, chat_id: str) -> None:
+    _require_keyring()
+    import keyring
+
+    payload = json.dumps({"bot_token": token.strip(), "chat_id": str(chat_id).strip()})
+    keyring.set_password("TKO:telegram", "default", payload)
+    legacy = _legacy_tg_file()
+    if legacy.exists():
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
 
 
 def load_telegram() -> TelegramCredentials | None:
-    path = _state_root() / "credentials" / "telegram.json"
-    if not path.exists():
+    if not _keyring_available():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
-    token = data.get("bot_token") or ""
-    chat = data.get("chat_id") or ""
-    if not token or not chat:
+    try:
+        import keyring
+
+        raw = keyring.get_password("TKO:telegram", "default")
+        if not raw:
+            return None
+        data = json.loads(raw)
+        return TelegramCredentials(SecretStr(data["bot_token"]), str(data["chat_id"]))
+    except Exception:
         return None
-    return TelegramCredentials(SecretStr(token), str(chat))
