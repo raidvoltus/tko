@@ -40,12 +40,14 @@ class ExecutionEngine:
         positions_store: PositionStore | None = None,
         audit: object | None = None,
         metrics: object | None = None,
+        lifecycle: object | None = None,
     ) -> None:
         self.client = client
         self.s = settings
         self.risk = risk
         self.audit = audit
         self.metrics = metrics
+        self.lifecycle = lifecycle
         self.positions_store = positions_store or PositionStore(state_dir / "positions.json")
         self.positions: dict[str, PositionState] = {}
         self.intents = IntentStore(state_dir / "order_intents.json")
@@ -90,6 +92,21 @@ class ExecutionEngine:
                     f"max_daily_notional {self.s.max_daily_notional:.4f}"
                 )
         return True, "ok"
+
+    def _assert_lifecycle_allows_submit(self) -> None:
+        """Final TOCTOU guard: reject submit if lifecycle is not READY (INV-33/47)."""
+        lc = self.lifecycle
+        if lc is None:
+            return
+        authorized = getattr(lc, "trading_authorized", None)
+        if callable(authorized):
+            ok = bool(authorized())
+        else:
+            ok = bool(authorized)
+        if not ok:
+            state = getattr(lc, "state", None)
+            state_v = getattr(state, "value", state)
+            raise RuntimeError(f"lifecycle rejects submit: state={state_v}")
 
     def buy(self, symbol: str, base: str, quote: str, decision: RiskDecision, last_price: float) -> OrderResult | None:
         if not decision.approved or decision.size_quote <= 0:
@@ -176,11 +193,19 @@ class ExecutionEngine:
         intent.attempts += 1
         self.intents.update(intent)
         try:
+            self._assert_lifecycle_allows_submit()
             result = self.client.create_order(
                 symbol=intent.symbol, side=side, amount=base_amount,
                 order_type=OrderType.MARKET, client_order_id=intent.client_order_id,
                 quote_amount=quote_amount if side == Side.BUY else None,
             )
+        except RuntimeError as exc:
+            logger.error("event=lifecycle_blocks_submit cid=%s err=%s", intent.client_order_id, exc)
+            intent.status = OrderIntentStatus.REJECTED
+            intent.error_category = "LIFECYCLE"
+            intent.error_message = str(exc)[:300]
+            self.intents.update(intent)
+            return None
         except TokocryptoError as exc:
             intent.error_category = exc.category.value
             intent.error_message = str(exc)[:300]
@@ -261,7 +286,6 @@ class ExecutionEngine:
                                       order_id=result.id, client_order_id=intent.client_order_id or "")
 
     def _reconcile(self, intent: OrderIntent, *, max_misses: int | None = None) -> None:
-        """Delegate to single Reconciler authority (INV-16)."""
         if max_misses is not None:
             self.reconciler.max_unknown_checks = max_misses
 
