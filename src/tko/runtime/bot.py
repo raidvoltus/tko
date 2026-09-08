@@ -1,4 +1,4 @@
-"""Main LIVE trading loop (multi-asset balance aware). LIVE only — no paper/demo."""
+"""Main LIVE trading loop with Stage-4 lifecycle governor. LIVE only — no paper/demo."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from tko.reconciliation.reconciler import Reconciler
 from tko.risk.engine import RiskEngine
 from tko.risk.pnl_tracker import DailyPnLTracker
 from tko.risk.position_store import PositionStore
+from tko.runtime.lifecycle import LifecycleGovernor, LifecycleState
 from tko.runtime.metrics import MetricsStore
 from tko.runtime.watchdog import Heartbeat
 from tko.strategy.btc import BtcAnalyzer
@@ -29,6 +30,7 @@ class TradingBot:
     def __init__(self, settings: Settings, state_dir: Path) -> None:
         self.s = settings
         self.state_dir = state_dir
+        self.lifecycle = LifecycleGovernor()
         creds = load_tokocrypto()
         self.client = TokocryptoClient(creds)
         self.audit = AuditLog(state_dir / "audit_log.jsonl")
@@ -52,12 +54,53 @@ class TradingBot:
         )
         self._running = False
         self._last_reconcile = 0.0
+        self._stop_requested = False
 
-    def start(self) -> None:
-        self._running = True
-        self.client.connect()
+    def _hb(self, status: str | None = None) -> None:
+        snap = self.lifecycle.snapshot()
+        self.heartbeat.beat(
+            status=status or snap.state.value,
+            lifecycle=snap.state.value,
+            trading_authorized=snap.trading_authorized,
+            last_error=snap.last_error,
+            extra={
+                "last_successful_recon_ts": snap.last_successful_recon_ts,
+                "last_exchange_contact_ts": snap.last_exchange_contact_ts,
+                "last_tick_ts": snap.last_tick_ts,
+            },
+        )
+
+    def _halt(self, reason: str) -> None:
+        self.lifecycle.force(LifecycleState.HALTED, reason=reason)
+        self.metrics.set_status("HALTED", reason[:200])
+        self._hb("HALTED")
+        self.audit.record("ERROR", reason=f"runtime_halted:{reason[:200]}")
+        try:
+            self.notify.send(f"TKO HALTED: {reason[:300]}")
+        except Exception:
+            pass
+        logger.critical("event=runtime_halted reason=%s", reason[:300])
+
+    def _startup_barrier(self) -> bool:
+        """Fail-closed startup. True only if READY reached."""
+        self.lifecycle.force(LifecycleState.STARTING, reason="startup")
+        self._hb("STARTING")
+        self.audit.record("DECISION", reason="runtime_starting")
+
+        try:
+            self.client.connect()
+            self.lifecycle.mark_exchange_contact()
+        except Exception as exc:
+            self._halt(f"exchange_connect_failed:{exc}")
+            return False
+
+        self.lifecycle.transition(LifecycleState.RECONCILING, reason="startup_recon")
+        self._hb("RECONCILING")
+        self.audit.record("DECISION", reason="runtime_reconciling")
+
         try:
             balances = self.client.fetch_balance()
+            self.lifecycle.mark_exchange_contact()
             free_map = {a: b.free for a, b in balances.items()}
             notes = self.positions_store.reconcile_with_balances(
                 free_map, min_dust=self.s.min_base_dust, stable_like=STABLE_LIKE
@@ -66,76 +109,134 @@ class TradingBot:
             eq = sum(float(free_map.get(q, 0.0)) for q in self.s.quote_asset_list())
             self.risk.set_equity_baseline_if_empty(eq)
             self.reconciler.reconcile_all(free_map)
+            self.lifecycle.mark_recon_ok()
             if notes:
                 logger.info("position reconcile notes=%s", notes)
         except Exception as exc:
-            logger.warning("Startup reconcile failed: %s", exc)
-            self.audit.record("ERROR", reason=f"startup_reconcile:{exc}")
+            self._halt(f"startup_reconciliation_failed:{exc}")
+            return False
 
+        if self.risk.kill_switch_active():
+            self.lifecycle.transition(LifecycleState.KILL, reason="kill_switch_active_on_startup")
+            self._hb("KILL")
+            self.metrics.set_status("KILL")
+            self.audit.record("ERROR", reason="kill_switch_active_on_startup")
+            return False
+
+        if self.client.circuit_open:
+            self._halt(f"circuit_open:{self.client.circuit_reason}")
+            return False
+
+        if not self.lifecycle.transition(LifecycleState.READY, reason="startup_ok"):
+            self._halt("cannot_enter_ready")
+            return False
         day = self.pnl.stats_for_day()
         self.metrics.update_pnl(day.day, day.realized_pnl, day.notional_traded)
         self.metrics.set_status("OK")
-        self.heartbeat.beat(status="OK")
-        self.notify.send(
-            f"TKO bot started — LIVE only\nday={day.day} pnl={day.realized_pnl:.4f} notional={day.notional_traded:.4f}"
-        )
-        self.audit.record("DECISION", reason="bot_started", extra={"day": day.day})
-        logger.info("Bot LIVE started — loop every %.0fs", self.s.loop_interval_sec)
+        self._hb("READY")
+        self.audit.record("DECISION", reason="runtime_ready", extra={"day": day.day})
         try:
-            while self._running:
-                self.heartbeat.beat(status="OK" if not self.risk.kill_switch_active() else "KILL")
+            self.notify.send(f"TKO READY — LIVE\nday={day.day} pnl={day.realized_pnl:.4f}")
+        except Exception:
+            pass
+        logger.info("event=runtime_ready loop_interval=%.0fs", self.s.loop_interval_sec)
+        return True
+
+    def start(self) -> None:
+        self._running = True
+        self._stop_requested = False
+        if not self._startup_barrier():
+            logger.error("Startup barrier failed — not entering trading loop")
+            while self._running and not self._stop_requested:
+                self._hb()
+                time.sleep(self.s.loop_interval_sec)
+            return
+
+        try:
+            while self._running and not self._stop_requested:
+                if not self.lifecycle.trading_authorized:
+                    self._hb()
+                    if self.lifecycle.state == LifecycleState.KILL:
+                        time.sleep(self.s.loop_interval_sec)
+                        continue
+                    if self.lifecycle.state in (
+                        LifecycleState.HALTED,
+                        LifecycleState.STOPPING,
+                        LifecycleState.STOPPED,
+                    ):
+                        break
+                    time.sleep(self.s.loop_interval_sec)
+                    continue
+
+                self._hb("READY")
                 if self.s.telegram_kill_command:
                     try:
                         self.notify.poll_kill_command(self.state_dir / "KILL")
                     except Exception:
                         pass
                 if self.risk.kill_switch_active():
+                    self.lifecycle.transition(LifecycleState.KILL, reason="kill_switch")
                     self.metrics.set_status("KILL")
-                    logger.warning("Kill switch active — sleeping")
+                    self._hb("KILL")
                     self.notify.send("TKO: kill switch ACTIVE — not trading")
                     time.sleep(self.s.loop_interval_sec)
                     continue
                 if self.client.circuit_open:
+                    self.lifecycle.transition(
+                        LifecycleState.DEGRADED, reason=f"circuit:{self.client.circuit_reason}"
+                    )
                     self.metrics.set_status("ERROR", "circuit_open")
+                    self._hb("DEGRADED")
                     self.notify.send("TKO: exchange circuit breaker OPEN")
                     time.sleep(self.s.loop_interval_sec)
                     continue
                 try:
                     breach = self.risk.check_daily_limits_or_kill()
                     if breach:
+                        self.lifecycle.transition(LifecycleState.KILL, reason=breach)
                         self.metrics.set_status("KILL", breach)
+                        self._hb("KILL")
                         self.notify.send(f"TKO kill: {breach}")
                         time.sleep(self.s.loop_interval_sec)
                         continue
-                    now = time.time()
-                    if now - self._last_reconcile >= float(self.s.reconcile_interval_sec):
-                        bal = self.client.fetch_balance()
-                        free_map = {a: b.free for a, b in bal.items()}
-                        self.reconciler.reconcile_all(free_map)
-                        self._last_reconcile = now
-                    self.execution.reconcile_pending()
                     self._tick()
-                    day = self.pnl.stats_for_day()
-                    self.metrics.update_pnl(day.day, day.realized_pnl, day.notional_traded)
+                    self.lifecycle.mark_tick()
                     self.metrics.set_status("OK")
                 except Exception as exc:
-                    logger.exception("Tick error: %s", exc)
-                    self.metrics.set_status("ERROR", str(exc))
-                    self.audit.record("ERROR", reason=str(exc)[:300])
-                    if self.s.telegram_notify_on_error:
-                        self.notify.send(f"TKO error: {type(exc).__name__}: {exc}")
+                    logger.exception("tick failed: %s", exc)
+                    self.audit.record("ERROR", reason=f"tick:{exc}")
+                    self.metrics.set_status("ERROR", str(exc)[:200])
+                    self.lifecycle.transition(LifecycleState.DEGRADED, reason=f"tick:{exc}")
+                    self._hb("DEGRADED")
                 time.sleep(self.s.loop_interval_sec)
         finally:
-            self.client.close()
-            self.heartbeat.beat(status="STOPPED")
-            self.notify.send("TKO bot stopped")
-            self.audit.record("DECISION", reason="bot_stopped")
+            if self.lifecycle.state not in (LifecycleState.STOPPED, LifecycleState.STOPPING):
+                self.stop()
 
     def stop(self) -> None:
+        """Idempotent graceful shutdown (INV-25)."""
+        if self.lifecycle.state == LifecycleState.STOPPED:
+            return
+        self._stop_requested = True
         self._running = False
+        self.lifecycle.force(LifecycleState.STOPPING, reason="shutdown_requested")
+        self._hb("STOPPING")
+        self.audit.record("DECISION", reason="runtime_stopping")
+        try:
+            self.client.close()
+        except Exception as exc:
+            logger.warning("client close: %s", exc)
+        self.lifecycle.force(LifecycleState.STOPPED, reason="shutdown_complete")
+        self._hb("STOPPED")
+        self.metrics.set_status("STOPPED")
+        self.audit.record("DECISION", reason="runtime_stopped")
+        logger.info("event=runtime_stopped")
 
     def _tick(self) -> None:
+        if not self.lifecycle.trading_authorized:
+            return
         balances = self.client.fetch_balance()
+        self.lifecycle.mark_exchange_contact()
         free_map = {a: b.free for a, b in balances.items() if b.free > 0}
         logger.info("balances free=%s", {k: round(v, 8) for k, v in sorted(free_map.items())})
         if self._manage_positions(free_map):
@@ -143,6 +244,8 @@ class TradingBot:
         self._try_buy_primary(free_map)
 
     def _manage_positions(self, free_map: dict[str, float]) -> bool:
+        if not self.lifecycle.trading_authorized:
+            return False
         bases = self.s.tradeable_base_list()
         quotes = self.s.quote_asset_list()
         acted = False
@@ -159,76 +262,67 @@ class TradingBot:
                 if symbol:
                     quote_used = q
                     break
-            if not symbol:
-                symbol = self._find_any_market_for_base(base)
-            if not symbol:
+            if not symbol or not quote_used:
                 continue
-            ok, reason = self.client.validate_symbol_ready(symbol)
-            if not ok:
+            try:
+                ticker = self.client.fetch_ticker(symbol)
+                last = float(ticker.last or 0)
+            except Exception as exc:
+                logger.warning("ticker failed %s: %s", symbol, exp)
                 continue
-            ticker = self.client.fetch_ticker(symbol)
-            candles = self.client.fetch_ohlcv(symbol, timeframe=self.s.ohlcv_timeframe, limit=self.s.ohlcv_limit)
-            decision = self.strategy.analyze(candles)
-            entry = self.execution.load_entry_price(symbol)
-            sell_dec = self.risk.evaluate_sell(
-                free_base=free_base, entry_price=entry, last_price=ticker.last,
-                signal_sell=(decision.signal == Signal.SELL), estimated_notional=free_base * ticker.last,
+            if last <= 0:
+                continue
+            entry = self.execution.load_entry_price(symbol) or last
+            decision = self.risk.evaluate_exit(
+                symbol=symbol, base_free=free_base, last_price=last, entry_price=entry
             )
-            self.audit.record("DECISION", symbol=symbol, side="sell",
-                             reason=f"sig={decision.signal.value};{sell_dec.reason}",
-                             extra={"approved": sell_dec.approved})
-            if sell_dec.approved:
-                result = self.execution.sell(symbol, sell_dec, ticker.last, base=base, quote=quote_used or "")
-                if result and self.s.telegram_notify_on_trade:
+            if decision.approved and decision.size_base > 0:
+                if not self.lifecycle.trading_authorized:
+                    return acted
+                result = self.execution.sell(
+                    symbol, decision, last, base=base, quote=quote_used
+                )
+                if result:
+                    acted = True
                     self.notify.send(
-                        f"SELL {symbol}\namount={result.filled:.8f}\navg={result.average}\nreason={sell_dec.reason}"
+                        f"SELL {symbol} filled={result.filled} avg={result.average}"
                     )
-                acted = True
         return acted
 
     def _try_buy_primary(self, free_map: dict[str, float]) -> None:
+        if not self.lifecycle.trading_authorized:
+            return
         base = self.s.base_asset.upper()
         quotes = self.s.quote_asset_list()
-        open_pos = sum(
-            1 for a, v in free_map.items()
-            if a in self.s.tradeable_base_list() and a not in STABLE_LIKE and v > self.s.min_base_dust
-        )
         for quote in quotes:
-            free_quote = free_map.get(quote, 0.0)
-            if free_quote < self.s.min_balance_for_quote(quote):
+            free_q = free_map.get(quote, 0.0)
+            if free_q < self.s.min_quote_balance:
                 continue
             symbol = self.client.resolve_symbol(base, quote)
             if not symbol:
                 continue
-            ok, reason = self.client.validate_symbol_ready(symbol)
-            if not ok:
+            try:
+                ohlcv = self.client.fetch_ohlcv(symbol, timeframe=self.s.timeframe, limit=100)
+                ticker = self.client.fetch_ticker(symbol)
+                last = float(ticker.last or 0)
+            except Exception as exc:
+                logger.warning("market data failed %s: %s", symbol, exp)
                 continue
-            ticker = self.client.fetch_ticker(symbol)
-            candles = self.client.fetch_ohlcv(symbol, timeframe=self.s.ohlcv_timeframe, limit=self.s.ohlcv_limit)
-            decision = self.strategy.analyze(candles)
-            if decision.signal != Signal.BUY:
-                self.audit.record("DECISION", symbol=symbol, side="buy",
-                                 reason=f"sig={decision.signal.value};{decision.reason}")
+            if last <= 0:
                 continue
-            buy_dec = self.risk.evaluate_buy(
-                free_quote=free_quote, last_price=ticker.last, open_positions=open_pos, quote_asset=quote,
+            signal = self.strategy.analyze(ohlcv, last)
+            if signal != Signal.BUY:
+                continue
+            decision = self.risk.evaluate_entry(
+                symbol=symbol, quote_free=free_q, last_price=last, signal=signal
             )
-            self.audit.record("DECISION", symbol=symbol, side="buy", reason=buy_dec.reason,
-                             quantity=buy_dec.size_base, price=ticker.last,
-                             extra={"approved": buy_dec.approved, "size_quote": buy_dec.size_quote})
-            if not buy_dec.approved:
+            if not decision.approved:
                 continue
-            result = self.execution.buy(symbol=symbol, base=base, quote=quote, decision=buy_dec, last_price=ticker.last)
-            if result and self.s.telegram_notify_on_trade:
+            if not self.lifecycle.trading_authorized:
+                return
+            result = self.execution.buy(symbol, base, quote, decision, last)
+            if result:
                 self.notify.send(
-                    f"BUY {symbol}\namount={result.filled:.8f}\navg={result.average}\n"
-                    f"spent≈{buy_dec.size_quote:.4f} {quote}\nreason={buy_dec.reason}"
+                    f"BUY {symbol} filled={result.filled} avg={result.average}"
                 )
             return
-
-    def _find_any_market_for_base(self, base: str) -> str | None:
-        for q in self.s.quote_asset_list():
-            s = self.client.resolve_symbol(base, q)
-            if s:
-                return s
-        return None
