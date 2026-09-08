@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tko"
+version = "0.1.0"
+description = "TKO — Autonomous Tokocrypto LIVE Trading Bot (Windows 10+)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "raidvoltus" }]
+keywords = ["tokocrypto", "crypto", "trading", "autonomous", "live"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Private :: Do Not Upload",
+]
+
+dependencies = [
+    "ccxt>=4.2.0",
+    "python-telegram-bot>=21.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "keyring>=25.0; platform_system=='Windows'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+]
+packaging = [
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+tko = "tko.runtime.entrypoint:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
