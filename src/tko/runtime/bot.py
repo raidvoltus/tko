@@ -1,4 +1,4 @@
-"""Main LIVE trading loop with Stage-4 lifecycle governor. LIVE only — no paper/demo."""
+"""Main LIVE trading loop with Stage-4 lifecycle governor. LIVE only."""
 
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ class TradingBot:
             self.client, settings, state_dir,
             risk=self.risk, positions_store=self.positions_store,
             audit=self.audit, metrics=self.metrics,
+            lifecycle=self.lifecycle,
         )
         self.notify = TelegramNotifier(
             load_telegram() if settings.telegram_enabled else None, audit=self.audit,
@@ -129,7 +130,7 @@ class TradingBot:
         self._hb("READY")
         self.audit.record("DECISION", reason="runtime_ready", extra={"day": day.day})
         try:
-            self.notify.send(f"TKO READY — LIVE\nday={day.day} pnl={day.realized_pnl:.4f}")
+            self.notify.send(f"TKO READY LIVE day={day.day} pnl={day.realized_pnl:.4f}")
         except Exception:
             pass
         logger.info("event=runtime_ready loop_interval=%.0fs", self.s.loop_interval_sec)
@@ -139,7 +140,7 @@ class TradingBot:
         self._running = True
         self._stop_requested = False
         if not self._startup_barrier():
-            logger.error("Startup barrier failed — not entering trading loop")
+            logger.error("Startup barrier failed - not entering trading loop")
             while self._running and not self._stop_requested:
                 self._hb()
                 time.sleep(self.s.loop_interval_sec)
@@ -165,7 +166,7 @@ class TradingBot:
                     self.lifecycle.transition(LifecycleState.KILL, reason="kill_switch")
                     self.metrics.set_status("KILL")
                     self._hb("KILL")
-                    self.notify.send("TKO: kill switch ACTIVE — not trading")
+                    self.notify.send("TKO: kill switch ACTIVE - not trading")
                     time.sleep(self.s.loop_interval_sec)
                     continue
                 if self.client.circuit_open:
@@ -203,7 +204,9 @@ class TradingBot:
             return
         self._stop_requested = True
         self._running = False
-        self.lifecycle.force(LifecycleState.STOPPING, reason="shutdown_requested")
+        self.lifecycle.request_stop()
+        if self.lifecycle.state != LifecycleState.STOPPING:
+            self.lifecycle.force(LifecycleState.STOPPING, reason="shutdown_requested")
         self._hb("STOPPING")
         self.audit.record("DECISION", reason="runtime_stopping")
         try:
