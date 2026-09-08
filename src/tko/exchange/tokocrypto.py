@@ -74,7 +74,7 @@ class TokocryptoClient:
         for sym, m in (self._client.markets or {}).items():
             try:
                 self._constraints_cache[sym] = extract_market_constraints(m)
-            except Exception as exc:
+            except Exception as exp:
                 logger.warning("constraints parse failed for %s: %s", sym, exp)
         logger.info("event=market_constraints_loaded markets=%d recvWindow=%d timeout_ms=%d mode=LIVE",
                     len(self._client.markets or {}), DEFAULT_RECV_WINDOW, self._timeout_ms)
