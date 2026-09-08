@@ -6,13 +6,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Runtime settings. Secrets live in CredentialStore only."""
-
     model_config = SettingsConfigDict(
-        env_prefix="TKO_",
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
+        env_prefix="TKO_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
     exchange_id: str = "tokocrypto"
@@ -54,6 +49,11 @@ class Settings(BaseSettings):
     telegram_enabled: bool = True
     telegram_notify_on_trade: bool = True
     telegram_notify_on_error: bool = True
+
+    reconcile_interval_sec: float = 900.0
+    heartbeat_stale_sec: float = 300.0
+    watchdog_enabled: bool = True
+    telegram_kill_command: bool = True
 
     def quote_asset_list(self) -> list[str]:
         items = [x.strip().upper() for x in self.quote_assets.split(",") if x.strip()]
