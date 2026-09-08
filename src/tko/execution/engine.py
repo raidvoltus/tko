@@ -253,24 +253,54 @@ class ExecutionEngine:
                 self.risk.record_fill(side="sell", symbol=intent.symbol, notional=notional, pnl=pnl,
                                       order_id=result.id, client_order_id=intent.client_order_id or "")
 
-    def _reconcile(self, intent: OrderIntent) -> None:
+    def _reconcile(self, intent: OrderIntent, *, max_misses: int = 5) -> None:
+        """Unified recon policy (Stage 3): stay blocking until FOUND or MANUAL_REVIEW.
+
+        SUBMITTING/UNKNOWN → RECONCILIATION (blocking)
+          found → CONFIRMED
+          miss  → remain RECONCILIATION; after max_misses → MANUAL_REVIEW (blocking)
+        Never transitions to RETRY_ELIGIBLE (no automatic re-POST).
+        """
         intent.status = OrderIntentStatus.RECONCILIATION
+        intent.attempts = int(intent.attempts or 0) + 1
         self.intents.update(intent)
-        found = self.client.find_order_by_client_id(intent.symbol, intent.client_order_id)
+        found = None
+        try:
+            found = self.client.find_order_by_client_id(intent.symbol, intent.client_order_id)
+        except Exception as exc:
+            logger.warning("event=reconcile_query_failed cid=%s err=%s", intent.client_order_id, exc)
         if found:
-            intent.status = OrderIntentStatus.CONFIRMED
-            intent.exchange_order_id = str(found.get("id") or "")
-            intent.filled = float(found.get("filled") or 0)
-            avg = found.get("average") or found.get("price")
-            intent.average = float(avg) if avg is not None else None
-            self.intents.update(intent)
-            side = Side.BUY if intent.side == "buy" else Side.SELL
-            synthetic = self._result_from_intent(intent, side)
-            base = intent.symbol.split("/")[0] if "/" in intent.symbol else ""
-            quote = intent.symbol.split("/")[1] if "/" in intent.symbol else ""
-            self._on_fill_confirmed(intent, side, synthetic, base=base, quote=quote)
-            return
-        intent.status = OrderIntentStatus.RETRY_ELIGIBLE
+            oid = str(found.get("id") or "").strip()
+            if not oid:
+                logger.warning("event=reconcile_found_without_id cid=%s", intent.client_order_id)
+            else:
+                intent.status = OrderIntentStatus.CONFIRMED
+                intent.exchange_order_id = oid
+                try:
+                    intent.filled = float(found.get("filled") or 0)
+                except (TypeError, ValueError):
+                    intent.filled = 0.0
+                avg = found.get("average") or found.get("price")
+                try:
+                    intent.average = float(avg) if avg is not None else None
+                except (TypeError, ValueError):
+                    intent.average = None
+                self.intents.update(intent)
+                side = Side.BUY if intent.side == "buy" else Side.SELL
+                synthetic = self._result_from_intent(intent, side)
+                base = intent.symbol.split("/")[0] if "/" in intent.symbol else ""
+                quote = intent.symbol.split("/")[1] if "/" in intent.symbol else ""
+                self._on_fill_confirmed(intent, side, synthetic, base=base, quote=quote)
+                return
+        if intent.attempts >= max_misses:
+            intent.status = OrderIntentStatus.MANUAL_REVIEW
+            logger.critical(
+                "event=order_manual_review cid=%s attempts=%d — operator action required",
+                intent.client_order_id,
+                intent.attempts,
+            )
+        else:
+            intent.status = OrderIntentStatus.RECONCILIATION
         self.intents.update(intent)
 
     def _result_from_intent(self, intent: OrderIntent, side: Side) -> OrderResult:
