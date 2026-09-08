@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     max_open_positions: int = 3
     kill_switch_file: str = "state/KILL"
 
+    max_order_notional: float = 7_500_000.0
+    max_daily_notional: float = 30_000_000.0
+    daily_equity_baseline: float = 0.0
+    risk_timezone: str = "Asia/Jakarta"
+
     data_dir: str = "data"
     state_dir: str = "state"
     log_dir: str = "logs"
