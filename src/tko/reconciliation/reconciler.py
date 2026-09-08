@@ -87,10 +87,7 @@ class Reconciler:
             hits = self._unknown_hits.get(cid, 0) + 1
             self._unknown_hits[cid] = hits
             if hits >= self.max_unknown_checks:
-                try:
-                    intent.status = OrderIntentStatus.MANUAL_REVIEW
-                except Exception:
-                    intent.status = OrderIntentStatus.RETRY_ELIGIBLE
+                intent.status = OrderIntentStatus.MANUAL_REVIEW
                 self.intents.update(intent)
                 result.intents_manual_review += 1
                 result.notes.append(f"manual_review {cid} after {hits} checks")
