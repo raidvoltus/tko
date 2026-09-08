@@ -1,4 +1,4 @@
 """Append-only audit log."""
-from tko.audit.audit_log import AuditEvent, AuditLog
+from tko.audit.audit_log import AuditLog
 
-__all__ = ["AuditLog", "AuditEvent"]
+__all__ = ["AuditLog"]

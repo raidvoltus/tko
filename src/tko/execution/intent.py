@@ -172,6 +172,10 @@ class IntentStore:
             self._items[intent.client_order_id] = intent
             self._save()
 
+    def by_client_id(self, client_order_id: str) -> OrderIntent | None:
+        with self._lock:
+            return self._items.get(client_order_id)
+
     def has_blocking_intent(self, symbol: str, side: str) -> bool:
         with self._lock:
             for intent in self._items.values():
