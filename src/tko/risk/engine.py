@@ -26,6 +26,7 @@ class RiskEngine:
         settings: Settings,
         state_dir: Path,
         pnl_tracker: DailyPnLTracker | None = None,
+        audit: object | None = None,
     ) -> None:
         self.s = settings
         self.state_dir = state_dir
@@ -34,7 +35,15 @@ class RiskEngine:
             state_dir / "pnl_ledger.jsonl",
             timezone_name=settings.risk_timezone,
         )
+        self.audit = audit
         self._equity_baseline = float(settings.daily_equity_baseline or 0.0)
+
+    def _risk_block(self, reason: str) -> None:
+        if self.audit is not None:
+            try:
+                self.audit.record("RISK_BLOCK", reason=reason)  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     def set_equity_baseline_if_empty(self, equity: float) -> None:
         if self._equity_baseline <= 0 and equity > 0:
@@ -48,6 +57,11 @@ class RiskEngine:
         p = self.state_dir / "KILL"
         p.write_text(reason[:500], encoding="utf-8")
         logger.warning("KILL SWITCH ACTIVATED reason=%s", reason)
+        if self.audit is not None:
+            try:
+                self.audit.record("KILL_SWITCH", reason=reason[:300])  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     def clear_kill_switch(self) -> None:
         for p in (self.state_dir / "KILL", Path(self.s.kill_switch_file)):
@@ -55,9 +69,7 @@ class RiskEngine:
                 p.unlink(missing_ok=True)
 
     def daily_loss_breached(self) -> bool:
-        if self.s.max_daily_loss_pct <= 0:
-            return False
-        if self._equity_baseline <= 0:
+        if self.s.max_daily_loss_pct <= 0 or self._equity_baseline <= 0:
             return False
         pnl = self.pnl.today_realized_pnl()
         loss_pct = (-pnl / self._equity_baseline) * 100.0 if pnl < 0 else 0.0
@@ -83,30 +95,22 @@ class RiskEngine:
         quote_asset: str | None = None,
     ) -> RiskDecision:
         if self.kill_switch_active():
+            self._risk_block("kill switch active")
             return RiskDecision(False, "kill switch active", 0.0, 0.0)
         breach = self.check_daily_limits_or_kill()
         if breach:
             return RiskDecision(False, breach, 0.0, 0.0)
-
         min_q = self.s.min_balance_for_quote(quote_asset or self.s.quote_asset)
         if free_quote < min_q:
-            return RiskDecision(
-                False,
-                f"quote balance {free_quote:.8f} < min {min_q:.8f}",
-                0.0,
-                0.0,
-            )
+            return RiskDecision(False, f"quote balance {free_quote:.8f} < min {min_q:.8f}", 0.0, 0.0)
         if open_positions >= self.s.max_open_positions:
             return RiskDecision(False, "max open positions reached", 0.0, 0.0)
         if last_price <= 0:
             return RiskDecision(False, "invalid price", 0.0, 0.0)
-
         size_quote = free_quote * (self.s.max_position_pct / 100.0)
         size_quote = min(size_quote, free_quote * 0.95)
-
         if self.s.max_order_notional > 0:
             size_quote = min(size_quote, float(self.s.max_order_notional))
-
         if self.s.max_daily_notional > 0:
             used = self.pnl.today_notional()
             remaining = float(self.s.max_daily_notional) - used
@@ -114,18 +118,12 @@ class RiskEngine:
                 return RiskDecision(
                     False,
                     f"max daily notional reached ({used:.4f}/{self.s.max_daily_notional:.4f})",
-                    0.0,
-                    0.0,
+                    0.0, 0.0,
                 )
             size_quote = min(size_quote, remaining)
-
         if size_quote < min_q * 0.5:
             return RiskDecision(False, "computed size too small", 0.0, 0.0)
-        if self.s.max_order_notional > 0 and size_quote > self.s.max_order_notional + 1e-9:
-            return RiskDecision(False, "size exceeds max_order_notional", 0.0, 0.0)
-
-        size_base = size_quote / last_price
-        return RiskDecision(True, "approved", size_quote, size_base)
+        return RiskDecision(True, "approved", size_quote, size_quote / last_price)
 
     def evaluate_sell(
         self,
@@ -144,40 +142,25 @@ class RiskEngine:
             return RiskDecision(False, "no base balance", 0.0, 0.0)
         if last_price <= 0:
             return RiskDecision(False, "invalid price", 0.0, 0.0)
-
         notional = estimated_notional if estimated_notional is not None else free_base * last_price
         if self.s.max_order_notional > 0 and notional > self.s.max_order_notional:
-            capped_base = float(self.s.max_order_notional) / last_price
-            free_base = min(free_base, capped_base)
-
+            free_base = min(free_base, float(self.s.max_order_notional) / last_price)
         if entry_price and entry_price > 0:
             pnl_pct = (last_price - entry_price) / entry_price * 100.0
             if pnl_pct >= self.s.take_profit_pct:
                 return RiskDecision(True, f"take profit {pnl_pct:.2f}%", 0.0, free_base)
             if pnl_pct <= -abs(self.s.stop_loss_pct):
                 return RiskDecision(True, f"stop loss {pnl_pct:.2f}%", 0.0, free_base)
-
         if signal_sell:
             return RiskDecision(True, "strategy SELL signal", 0.0, free_base)
-
         return RiskDecision(False, "hold position", 0.0, 0.0)
 
     def record_fill(
-        self,
-        *,
-        side: str,
-        symbol: str,
-        notional: float,
-        pnl: float = 0.0,
-        order_id: str = "",
-        client_order_id: str = "",
+        self, *, side: str, symbol: str, notional: float, pnl: float = 0.0,
+        order_id: str = "", client_order_id: str = "",
     ) -> None:
         self.pnl.record_trade(
-            side=side,
-            symbol=symbol,
-            notional=notional,
-            pnl=pnl,
-            order_id=order_id,
-            client_order_id=client_order_id,
+            side=side, symbol=symbol, notional=notional, pnl=pnl,
+            order_id=order_id, client_order_id=client_order_id,
         )
         self.check_daily_limits_or_kill()
