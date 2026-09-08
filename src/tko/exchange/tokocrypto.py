@@ -75,7 +75,7 @@ class TokocryptoClient:
             try:
                 self._constraints_cache[sym] = extract_market_constraints(m)
             except Exception as exc:
-                logger.warning("constraints parse failed for %s: %s", sym, exc)
+                logger.warning("constraints parse failed for %s: %s", sym, exp)
         logger.info("event=market_constraints_loaded markets=%d recvWindow=%d timeout_ms=%d mode=LIVE",
                     len(self._client.markets or {}), DEFAULT_RECV_WINDOW, self._timeout_ms)
 
@@ -167,13 +167,13 @@ class TokocryptoClient:
                 raw = self._client.create_order(symbol, "limit", side.value, amount, price, params)
         except TokocryptoError:
             raise
-        except Exception as exc:
-            cat = classify_exception(exc)
+        except Exception as exp:
+            cat = classify_exception(exp)
             if cat == ErrorCategory.CIRCUIT_BREAKER:
-                self.open_circuit(str(exc)[:200])
+                self.open_circuit(str(exp)[:200])
             if cat == ErrorCategory.RATE_LIMIT:
                 self.trip_rate_limit()
-            raise TokocryptoError(f"create_order failed: {exc}", category=cat, ambiguous=is_ambiguous(cat)) from exc
+            raise TokocryptoError(f"create_order failed: {exp}", category=cat, ambiguous=is_ambiguous(cat)) from exp
         return self._parse_order_result(raw, symbol=symbol, side=side, order_type=order_type,
                                         amount=amount, quote_amount=quote_amount, price=price,
                                         client_order_id=client_order_id)
@@ -184,8 +184,8 @@ class TokocryptoClient:
         try:
             v = validate_order_payload(raw, expected_client_order_id=client_order_id,
                                        default_amount=amount or quote_amount or 0.0)
-        except InvalidOrderResponse as exc:
-            raise TokocryptoError(str(exc), category=ErrorCategory.INVALID_RESPONSE) from exc
+        except InvalidOrderResponse as exp:
+            raise TokocryptoError(str(exp), category=ErrorCategory.INVALID_RESPONSE) from exp
         return OrderResult(id=v.id, symbol=symbol, side=side, type=order_type, amount=float(v.amount),
                            price=v.price if v.price is not None else price, status=v.status,
                            filled=float(v.filled), remaining=float(v.remaining), average=v.average,
@@ -203,7 +203,7 @@ class TokocryptoClient:
                 for o in orders or []:
                     if self._match_client_id(o, client_order_id):
                         return o
-            except Exception as exc:
+            except Exception as exp:
                 logger.warning("%s during recon: %s", fetcher_name, exp)
         return None
 
