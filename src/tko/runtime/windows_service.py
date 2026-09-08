@@ -134,20 +134,26 @@ def install_scheduled_task(
     result = run_schtasks(schtasks_create_args(plan, force=force, use_system=use_system))
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "")[:500]
-        return ServiceResult(False, "schtasks /Create gagal", detail=detail)
-    return ServiceResult(True, f"Task terpasang: {plan.task_name}", detail=restart_policy_notes())
+        return ServiceResult(
+            False,
+            "Gagal membuat task — jalankan sebagai Administrator.",
+            detail=detail,
+        )
+    return ServiceResult(
+        True, f"Task berhasil terpasang: {plan.task_name}", detail=restart_policy_notes()
+    )
 
 
 def uninstall_scheduled_task(task_name: str = DEFAULT_TASK_NAME) -> ServiceResult:
     if sys.platform != "win32":
         return ServiceResult(False, "uninstall-service hanya didukung di Windows.")
     if not task_exists(task_name):
-        return ServiceResult(True, f"Task tidak ada (noop): {task_name}")
+        return ServiceResult(False, f"Task tidak ditemukan: {task_name}")
     result = run_schtasks(schtasks_delete_args(task_name))
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "")[:500]
         return ServiceResult(False, "schtasks /Delete gagal", detail=detail)
-    return ServiceResult(True, f"Task dihapus: {task_name}")
+    return ServiceResult(True, f"Task berhasil dihapus: {task_name}")
 
 
 def restart_policy_notes() -> str:
