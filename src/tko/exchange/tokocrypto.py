@@ -191,21 +191,38 @@ class TokocryptoClient:
                            filled=float(v.filled), remaining=float(v.remaining), average=v.average,
                            client_order_id=v.client_order_id)
 
-    def find_order_by_client_id(self, symbol: str, client_order_id: str, *, lookback_limit: int = 50) -> dict[str, Any] | None:
+    def find_order_by_client_id(
+        self, symbol: str, client_order_id: str, *, lookback_limit: int = 50
+    ) -> "OrderLookupResult":
+        """Lookup by client id with explicit FOUND / NOT_FOUND / QUERY_FAILED (INV-18).
+
+        Never collapses total query failure into NOT_FOUND.
+        """
+        from tko.exchange.order_response import OrderLookupResult
+
         self.connect()
+        errors: list[str] = []
+        attempted = 0
         for fetcher_name in ("fetch_open_orders", "fetch_closed_orders", "fetch_orders"):
             if not hasattr(self._client, fetcher_name):
                 continue
+            attempted += 1
             try:
                 method = getattr(self._client, fetcher_name)
                 kwargs = {"limit": lookback_limit} if fetcher_name != "fetch_open_orders" else {}
                 orders = method(symbol, **kwargs) if fetcher_name != "fetch_open_orders" else method(symbol)
                 for o in orders or []:
                     if self._match_client_id(o, client_order_id):
-                        return o
+                        return OrderLookupResult.found(o)
             except Exception as exp:
+                errors.append(f"{fetcher_name}: {exp}")
                 logger.warning("%s during recon: %s", fetcher_name, exp)
-        return None
+
+        if attempted == 0:
+            return OrderLookupResult.query_failed("no order fetch methods available on client")
+        if errors and len(errors) >= attempted:
+            return OrderLookupResult.query_failed("; ".join(errors)[:500])
+        return OrderLookupResult.not_found()
 
     @staticmethod
     def _match_client_id(order: dict[str, Any], client_order_id: str) -> bool:
