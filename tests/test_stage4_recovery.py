@@ -18,6 +18,15 @@ def _gates(**over):
     return base
 
 
+def _to_ready(g, *, reason: str = "test_ready") -> None:
+    if g.state == LifecycleState.STARTING:
+        g.transition(LifecycleState.RECONCILING, reason="test_recon")
+    elif g.state != LifecycleState.RECONCILING:
+        g.force(LifecycleState.STARTING, reason="test_reset")
+        g.transition(LifecycleState.RECONCILING, reason="test_recon")
+    assert g.authorize_ready(reason=reason, **_gates())
+
+
 def test_halted_cannot_go_direct_ready():
     g = LifecycleGovernor()
     g.force(LifecycleState.HALTED, reason="fail")
@@ -49,7 +58,7 @@ def test_halted_no_direct_reconciling():
 
 def test_degraded_may_begin_recovery():
     g = LifecycleGovernor()
-    g.force(LifecycleState.READY, reason="ok")
+    _to_ready(g, reason="ok")
     g.transition(LifecycleState.DEGRADED, reason="tick")
     assert g.begin_recovery(reason="auto")
     assert g.state == LifecycleState.RECOVERY
