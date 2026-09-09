@@ -142,8 +142,9 @@ def test_inv44_xml_contains_ignore_new():
 
     plan = ServicePlan(
         task_name="TKO",
-        command_line="C:\\tko\\tko.exe run",
-        working_directory="C:\\tko",
+        exe_path=Path("C:/tko/tko.exe"),
+        work_dir=Path("C:/tko"),
+        command_line='cmd.exe /c cd /d "C:\\tko" && "C:\\tko\\tko.exe" run',
     )
     xml = build_task_xml(plan)
     assert "IgnoreNew" in xml
