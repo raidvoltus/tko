@@ -4,7 +4,8 @@ INV-20..INV-60: only READY may authorize LIVE trading.
 KILL is a hard safety state: no direct KILL->READY.
 Autonomous recovery: KILL|HALTED|DEGRADED -> RECOVERY -> RECONCILING -> READY only after validation.
 READY only via authorize_ready() with ALL validation gates True (INV-51).
-transition(READY) is always rejected.
+transition(READY) and force(READY) are always rejected.
+Only authorize_ready() may enter READY.
 Submit handoff is race-safe via _submit_mutex (concurrent TOCTOU closed).
 """
 
@@ -49,7 +50,6 @@ _TRANSITIONS: dict[LifecycleState, frozenset[LifecycleState]] = {
     ),
     LifecycleState.RECONCILING: frozenset(
         {
-            # READY only via authorize_ready() after full validation (INV-51)
             LifecycleState.HALTED,
             LifecycleState.DEGRADED,
             LifecycleState.STOPPING,
@@ -204,19 +204,11 @@ class LifecycleGovernor:
 
     def force(self, target: LifecycleState, *, reason: str = "") -> None:
         with self._lock:
-            if target == LifecycleState.READY and self._kill_sticky:
-                logger.warning("event=lifecycle_force_rejected to=READY reason=kill_sticky")
-                return
-            if target == LifecycleState.READY and self._state == LifecycleState.KILL:
-                logger.warning("event=lifecycle_force_rejected from=KILL to=READY")
-                return
-            if target == LifecycleState.READY and self._state in (
-                LifecycleState.DEGRADED,
-                LifecycleState.HALTED,
-                LifecycleState.RECOVERY,
-            ):
+            # INV-51 / sole READY path: force(READY) always rejected from ANY state.
+            # Only authorize_ready() may enter READY after validation gates pass.
+            if target == LifecycleState.READY:
                 logger.warning(
-                    "event=lifecycle_force_rejected from=%s to=READY must_reconcile_first",
+                    "event=lifecycle_force_rejected from=%s to=READY reason=use_authorize_ready",
                     self._state.value,
                 )
                 return
@@ -254,7 +246,6 @@ class LifecycleGovernor:
             )
 
     def begin_recovery(self, *, reason: str = "autonomous_recovery") -> bool:
-        """KILL/HALTED/DEGRADED -> RECOVERY (never READY). kill_sticky stays until authorize_ready."""
         with self._lock:
             if self._state not in (
                 LifecycleState.KILL,
@@ -276,7 +267,6 @@ class LifecycleGovernor:
             return True
 
     def complete_recovery_to_reconciling(self, *, reason: str = "recovery_recon") -> bool:
-        """RECOVERY -> RECONCILING only. READY requires authorize_ready after validation."""
         return self.transition(LifecycleState.RECONCILING, reason=reason)
 
     def authorize_ready(
@@ -290,11 +280,7 @@ class LifecycleGovernor:
         positions_ok: bool = False,
         exchange_ok: bool = False,
     ) -> bool:
-        """Sole path RECONCILING -> READY. Clears kill_sticky only after ALL gates pass.
-
-        INV-50..56: READY requires successful recon + risk + circuit + kill-clear +
-        exchange contact + positions. Callers cannot authorize with only connect success.
-        """
+        """Sole path RECONCILING -> READY. Clears kill_sticky only after ALL gates pass."""
         with self._lock:
             if self._state != LifecycleState.RECONCILING:
                 logger.warning(
@@ -333,7 +319,6 @@ class LifecycleGovernor:
             return True
 
     def request_stop(self) -> None:
-        """Disable trading immediately. Takes submit mutex so no concurrent create_order can start."""
         with self._submit_mutex:
             with self._lock:
                 if self._state in (LifecycleState.STOPPED, LifecycleState.STOPPING):
@@ -347,7 +332,6 @@ class LifecycleGovernor:
                 )
 
     def run_authorized_submit(self, submit_fn: Callable[[], T]) -> T:
-        """Atomically authorize and run submit_fn under the submit mutex (INV-33)."""
         with self._submit_mutex:
             with self._lock:
                 if self._state != LifecycleState.READY or self._kill_sticky:
