@@ -226,10 +226,10 @@ class ExecutionEngine:
                 except Exception:
                     pass
             return None
-        except Exception as exp:
+        except Exception as exc:
             intent.status = OrderIntentStatus.UNKNOWN
             intent.error_category = ErrorCategory.UNKNOWN_ERROR.value
-            intent.error_message = str(exp)[:300]
+            intent.error_message = str(exc)[:300]
             self.intents.update(intent)
             self._reconcile(intent)
             if intent.status == OrderIntentStatus.CONFIRMED:
