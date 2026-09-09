@@ -128,16 +128,21 @@ class DailyPnLTracker:
             # S5-B5: skip duplicate fill_event_id (crash replay)
             if feid and feid in self._fill_event_ids:
                 return self.stats_for_day(day)
+            # S5-B5.1: durable append is fail-closed — do not update aggregates
+            # or claim success if the ledger write/fsync fails. Callers must not
+            # mark_applied until record_trade returns without raising.
             try:
                 with self.path.open("a", encoding="utf-8") as fh:
                     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
                     fh.flush()
                     try:
                         os.fsync(fh.fileno())
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        logger.error("Failed to fsync PnL event: %s", exc)
+                        raise
             except OSError as exc:
                 logger.error("Failed to append PnL event: %s", exc)
+                raise
             self._realized_by_day[day] = self._realized_by_day.get(day, 0.0) + float(pnl)
             self._notional_by_day[day] = self._notional_by_day.get(day, 0.0) + abs(float(notional))
             self._count_by_day[day] = self._count_by_day.get(day, 0) + 1
