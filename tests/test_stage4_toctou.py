@@ -9,6 +9,24 @@ from tko.execution.engine import ExecutionEngine
 from tko.risk.engine import RiskDecision
 from tko.runtime.lifecycle import LifecycleGovernor, LifecycleState
 
+
+def _to_ready(g, *, reason: str = "test_ready") -> None:
+    if g.state == LifecycleState.STARTING:
+        g.transition(LifecycleState.RECONCILING, reason="test_recon")
+    elif g.state != LifecycleState.RECONCILING:
+        g.force(LifecycleState.STARTING, reason="test_reset")
+        g.transition(LifecycleState.RECONCILING, reason="test_recon")
+    assert g.authorize_ready(
+        reason=reason,
+        recon_ok=True,
+        kill_switch_clear=True,
+        circuit_clear=True,
+        daily_risk_ok=True,
+        positions_ok=True,
+        exchange_ok=True,
+    )
+
+
 def test_inv33_concurrent_toctou_create_order_never_reaches_exchange(tmp_path: Path):
     create_calls: list = []
     barrier = threading.Barrier(2, timeout=1)
@@ -32,7 +50,7 @@ def test_inv33_concurrent_toctou_create_order_never_reaches_exchange(tmp_path: P
     client.get_constraints.return_value = constraints
 
     lc = LifecycleGovernor()
-    lc.force(LifecycleState.READY, reason="ok")
+    _to_ready(lc, reason="ok")
     eng = ExecutionEngine(client, Settings(min_quote_balance=1), tmp_path, lifecycle=lc)
     dec = RiskDecision(True, "approved", size_quote=10000, size_base=0.01)
 
@@ -71,7 +89,7 @@ def test_inv33_stop_before_submit_blocks(tmp_path: Path):
     client.get_constraints.return_value = constraints
 
     lc = LifecycleGovernor()
-    lc.force(LifecycleState.READY, reason="ok")
+    _to_ready(lc, reason="ok")
     eng = ExecutionEngine(client, Settings(min_quote_balance=1), tmp_path, lifecycle=lc)
     dec = RiskDecision(True, "approved", size_quote=10000, size_base=0.01)
     lc.request_stop()
@@ -81,7 +99,7 @@ def test_inv33_stop_before_submit_blocks(tmp_path: Path):
 
 def test_run_authorized_submit_mutex_blocks_stop_during_submit():
     g = LifecycleGovernor()
-    g.force(LifecycleState.READY, reason="ok")
+    _to_ready(g, reason="ok")
     order: list = []
     started = threading.Event()
     release = threading.Event()
