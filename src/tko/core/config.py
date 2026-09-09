@@ -23,7 +23,6 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Explicit LIVE gate — must be True. cmd_run refuses anything other than True.
     live_mode: bool = True
 
     exchange_id: str = "tokocrypto"
@@ -47,6 +46,11 @@ class Settings(BaseSettings):
     ema_slow: int = Field(default=21, ge=2, le=500)
     ohlcv_timeframe: str = "15m"
     ohlcv_limit: int = Field(default=100, ge=20, le=1000)
+    # Stage 5 ML foundation (optional; default OFF — rule-based remains primary)
+    ml_filter_enabled: bool = False
+    ml_min_confidence: float = Field(default=0.55, ge=0.5, le=0.99)
+    ml_model_path: str = ""
+    ohlcv_store_enabled: bool = True
 
     max_daily_loss_pct: float = Field(default=5.0, gt=0, le=100.0)
     max_open_positions: int = Field(default=3, ge=1, le=50)
@@ -87,6 +91,7 @@ class Settings(BaseSettings):
         "daily_equity_baseline",
         "reconcile_interval_sec",
         "heartbeat_stale_sec",
+        "ml_min_confidence",
         mode="after",
     )
     @classmethod
@@ -149,7 +154,6 @@ class Settings(BaseSettings):
         return self
 
     def validate_for_live(self) -> None:
-        """Fail-closed barrier before any trading runtime is constructed."""
         try:
             Settings.model_validate(self.model_dump())
         except Exception as exc:
@@ -202,7 +206,6 @@ class Settings(BaseSettings):
 
 
 def load_settings() -> Settings:
-    """Load settings from env/.env and enforce LIVE safety validation."""
     try:
         settings = Settings()
     except Exception as exc:
