@@ -51,6 +51,7 @@ class PositionStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._positions: dict[str, StoredPosition] = {}
+        self._applied_fill_ids: set[str] = set()
         self._load()
 
     def _load(self) -> None:
@@ -67,6 +68,9 @@ class PositionStore:
                 pos = StoredPosition.from_dict(item)
                 if pos.amount > 0 and pos.symbol:
                     self._positions[pos.symbol] = pos
+            applied = raw.get("applied_fill_ids") if isinstance(raw, dict) else None
+            if isinstance(applied, list):
+                self._applied_fill_ids = {str(x) for x in applied}
         except Exception as exc:
             logger.warning("Failed to load positions from %s: %s", self.path, exc)
 
@@ -74,9 +78,18 @@ class PositionStore:
         payload = {
             "updated_at": time.time(),
             "positions": [p.to_dict() for p in self._positions.values()],
+            "applied_fill_ids": sorted(self._applied_fill_ids),
         }
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        data = json.dumps(payload, indent=2)
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+            try:
+                import os
+                os.fsync(fh.fileno())
+            except OSError:
+                pass
         tmp.replace(self.path)
 
     def all(self) -> list[StoredPosition]:
@@ -98,8 +111,19 @@ class PositionStore:
         order_id: str = "",
         client_order_id: str = "",
         opened_at: float | None = None,
+        fill_event_id: str = "",
     ) -> StoredPosition:
         with self._lock:
+            # S5-B5: skip if this fill event was already applied (crash replay)
+            fid = (fill_event_id or "").strip()
+            if fid and fid in self._applied_fill_ids:
+                existing = self._positions.get(symbol)
+                if existing:
+                    return existing
+                return StoredPosition(
+                    symbol=symbol, base=base, quote=quote, amount=0.0,
+                    entry_price=entry_price, opened_at=time.time(),
+                )
             existing = self._positions.get(symbol)
             if existing and existing.amount > 0 and amount > 0:
                 total_base = existing.amount + amount
@@ -136,6 +160,8 @@ class PositionStore:
                 self._positions.pop(symbol, None)
             else:
                 self._positions[symbol] = pos
+            if fid:
+                self._applied_fill_ids.add(fid)
             self._save()
             return pos
 
