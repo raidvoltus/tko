@@ -55,7 +55,7 @@ _SUSPECT_PATTERNS = [
     re.compile(r"requests\.post\s*\("),
     re.compile(r"httpx\.post\s*\("),
     re.compile(r"session\.post\s*\("),
-    re.compile(r"\.request\s*\(\s*[\'"]POST[\'"]", re.I),
+    re.compile(r"""\.request\s*\(\s*['\"]POST['\"]""", re.I),
     re.compile(r'["\']/api/v\d+/order'),
     re.compile(r'["\']/api/v\d+/orders'),
     re.compile(r"private_post_order"),
@@ -65,7 +65,6 @@ _SUSPECT_PATTERNS = [
 
 
 def test_global_live_submission_surface_audit():
-    """Expanded audit: no second LIVE order path outside engine gate + tokocrypto adapter."""
     root = Path(__file__).resolve().parents[1] / "src" / "tko"
     offenders: list[str] = []
     allow_files = {"tokocrypto.py", "engine.py"}
