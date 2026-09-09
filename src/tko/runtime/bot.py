@@ -199,6 +199,12 @@ class TradingBot:
             if self.lifecycle.state not in (LifecycleState.STOPPED, LifecycleState.STOPPING):
                 self.stop()
 
+    def request_shutdown(self) -> None:
+        """Public cooperative stop request (signal-safe). Lifecycle is sole authority."""
+        self.lifecycle.request_stop()
+        self._stop_requested = True
+        self._running = False
+
     def stop(self) -> None:
         if self.lifecycle.state == LifecycleState.STOPPED:
             return
