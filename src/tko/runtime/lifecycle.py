@@ -1,10 +1,10 @@
 """Runtime lifecycle state machine — trading authorization gate (Stage 4).
 
-INV-20..INV-47: only READY may authorize LIVE trading.
+INV-20..INV-60: only READY may authorize LIVE trading.
 KILL is a hard safety state: no direct KILL->READY.
 Autonomous recovery: KILL|HALTED|DEGRADED -> RECOVERY -> RECONCILING -> READY only after validation.
-DEGRADED/HALTED may not jump directly to READY.
-Autonomous recovery: HALTED|DEGRADED -> RECOVERY -> RECONCILING -> READY.
+READY only via authorize_ready() with ALL validation gates True (INV-51).
+transition(READY) is always rejected.
 Submit handoff is race-safe via _submit_mutex (concurrent TOCTOU closed).
 """
 
@@ -49,10 +49,11 @@ _TRANSITIONS: dict[LifecycleState, frozenset[LifecycleState]] = {
     ),
     LifecycleState.RECONCILING: frozenset(
         {
-            LifecycleState.READY,
+            # READY only via authorize_ready() after full validation (INV-51)
             LifecycleState.HALTED,
             LifecycleState.DEGRADED,
             LifecycleState.STOPPING,
+            LifecycleState.KILL,
         }
     ),
     LifecycleState.READY: frozenset(
@@ -75,15 +76,13 @@ _TRANSITIONS: dict[LifecycleState, frozenset[LifecycleState]] = {
     ),
     LifecycleState.KILL: frozenset(
         {
-            LifecycleState.RECOVERY,  # autonomous recovery only — never READY direct
+            LifecycleState.RECOVERY,
             LifecycleState.STOPPING,
             LifecycleState.HALTED,
         }
     ),
     LifecycleState.STOPPING: frozenset({LifecycleState.STOPPED}),
     LifecycleState.STOPPED: frozenset(),
-    # Full autonomous: HALTED is not a human dead-end, but cannot jump to READY.
-    # Recovery path: HALTED -> RECOVERY -> RECONCILING -> (validation) -> READY
     LifecycleState.HALTED: frozenset(
         {
             LifecycleState.RECOVERY,
@@ -172,9 +171,9 @@ class LifecycleGovernor:
 
     def transition(self, target: LifecycleState, *, reason: str = "") -> bool:
         with self._lock:
-            if self._kill_sticky and target == LifecycleState.READY:
+            if target == LifecycleState.READY:
                 logger.warning(
-                    "event=lifecycle_transition_rejected from=%s to=READY reason=kill_sticky",
+                    "event=lifecycle_transition_rejected from=%s to=READY reason=use_authorize_ready",
                     self._state.value,
                 )
                 return False
@@ -255,11 +254,7 @@ class LifecycleGovernor:
             )
 
     def begin_recovery(self, *, reason: str = "autonomous_recovery") -> bool:
-        """KILL/HALTED/DEGRADED -> RECOVERY (never READY). kill_sticky stays until authorize_ready.
-
-        Full autonomous path:
-            KILL|HALTED|DEGRADED -> RECOVERY -> RECONCILING -> authorize_ready -> READY
-        """
+        """KILL/HALTED/DEGRADED -> RECOVERY (never READY). kill_sticky stays until authorize_ready."""
         with self._lock:
             if self._state not in (
                 LifecycleState.KILL,
@@ -272,7 +267,6 @@ class LifecycleGovernor:
             prev = self._state
             self._state = LifecycleState.RECOVERY
             self._reason = reason[:300]
-            # kill_sticky remains True until authorize_ready() — no bypass
             logger.info(
                 "event=runtime_recovery from=%s reason=%s kill_sticky=%s",
                 prev.value,
@@ -285,17 +279,43 @@ class LifecycleGovernor:
         """RECOVERY -> RECONCILING only. READY requires authorize_ready after validation."""
         return self.transition(LifecycleState.RECONCILING, reason=reason)
 
-    def authorize_ready(self, *, reason: str = "recovery_validated") -> bool:
-        """Sole path from RECONCILING to READY that may clear kill_sticky.
+    def authorize_ready(
+        self,
+        *,
+        reason: str = "recovery_validated",
+        recon_ok: bool = False,
+        kill_switch_clear: bool = False,
+        circuit_clear: bool = False,
+        daily_risk_ok: bool = False,
+        positions_ok: bool = False,
+        exchange_ok: bool = False,
+    ) -> bool:
+        """Sole path RECONCILING -> READY. Clears kill_sticky only after ALL gates pass.
 
-        Requires state == RECONCILING. Clears kill_sticky only here so KILL cannot
-        become READY without explicit post-recovery authorization after reconciliation.
+        INV-50..56: READY requires successful recon + risk + circuit + kill-clear +
+        exchange contact + positions. Callers cannot authorize with only connect success.
         """
         with self._lock:
             if self._state != LifecycleState.RECONCILING:
                 logger.warning(
                     "event=lifecycle_authorize_ready_rejected state=%s",
                     self._state.value,
+                )
+                return False
+            gates = {
+                "recon_ok": recon_ok,
+                "kill_switch_clear": kill_switch_clear,
+                "circuit_clear": circuit_clear,
+                "daily_risk_ok": daily_risk_ok,
+                "positions_ok": positions_ok,
+                "exchange_ok": exchange_ok,
+            }
+            failed = [k for k, v in gates.items() if not v]
+            if failed:
+                logger.warning(
+                    "event=lifecycle_authorize_ready_rejected state=RECONCILING failed_gates=%s reason=%s",
+                    ",".join(failed),
+                    reason[:200],
                 )
                 return False
             prev = self._state
@@ -305,7 +325,7 @@ class LifecycleGovernor:
             self._reason = reason[:300]
             self._last_successful_recon_ts = time.time()
             logger.info(
-                "event=runtime_ready from=%s reason=%s cleared_kill_sticky=%s",
+                "event=runtime_ready from=%s reason=%s cleared_kill_sticky=%s gates=all_pass",
                 prev.value,
                 reason[:200],
                 was_sticky,
