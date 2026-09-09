@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from tko.core.config import Settings
 from tko.runtime.lifecycle import LifecycleGovernor, LifecycleState
 
