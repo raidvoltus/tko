@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from tko.core.config import Settings
 from tko.core.types import OHLCV, Signal
-from tko.strategy.btc import BtcAnalyzer, TradeDecision
+from tko.strategy.btc import BtcAnalyzer
 
 
 @dataclass
