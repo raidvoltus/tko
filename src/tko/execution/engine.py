@@ -12,6 +12,7 @@ from tko.core.config import Settings
 from tko.core.types import OrderResult, OrderType, Side
 from tko.exchange.tokocrypto import TokocryptoClient, TokocryptoError
 from tko.execution.errors import ErrorCategory, is_ambiguous
+from tko.execution.fill_journal import FillEvent, FillJournal, make_event_id
 from tko.execution.intent import IntentStore, OrderIntent, OrderIntentStatus
 from tko.reconciliation.reconciler import Reconciler
 from tko.risk.engine import RiskDecision, RiskEngine
@@ -51,6 +52,7 @@ class ExecutionEngine:
         self.positions_store = positions_store or PositionStore(state_dir / "positions.json")
         self.positions: dict[str, PositionState] = {}
         self.intents = IntentStore(state_dir / "order_intents.json")
+        self.fill_journal = FillJournal(state_dir / "fill_events.jsonl")
         self.reconciler = Reconciler(
             client=client,
             intents=self.intents,
@@ -67,6 +69,11 @@ class ExecutionEngine:
                     logger.info("event=startup_reservation_rehydrate count=%d", n)
             except Exception as exc:
                 logger.warning("reservation rehydrate failed: %s", exc)
+        # S5-B5: replay any journaled fills not yet applied (crash recovery)
+        try:
+            self._replay_unapplied_fills()
+        except Exception as exc:
+            logger.warning("fill journal replay failed: %s", exc)
 
     def _hydrate_positions_memory(self) -> None:
         for pos in self.positions_store.all():
@@ -339,20 +346,24 @@ class ExecutionEngine:
         partial: bool = False,
         remaining: float = 0.0,
     ) -> None:
-        """Apply fill accounting exactly-once using cumulative → delta (S5-B3).
+        """Exactly-once fill accounting via durable fill journal barrier (S5-B5).
 
-        Exchange reports *cumulative* filled. We only account
-        delta = max(0, cumulative_filled - intent.accounted_filled).
-        Duplicate callbacks with the same cumulative filled are no-ops.
+        Order of operations:
+          1. compute delta from cumulative vs accounted_filled
+          2. try_record into fill journal (fsync) — first durable barrier
+          3. apply position / watermark / PnL / reservation
+          4. mark_applied in journal
+
+        Crash after (2) and before (4): startup replays unapplied events.
+        Crash before (2): no durable trace → safe to recompute delta from exchange.
         """
         avg = result.average or intent.last_price or 0.0
         cumulative = float(result.filled or intent.normalized_base or intent.base_amount or 0.0)
         previously = float(getattr(intent, "accounted_filled", 0.0) or 0.0)
         delta = max(0.0, cumulative - previously)
-        if delta <= 1e-12 and not (not partial and previously > 0 and remaining <= 1e-12):
-            # No new fill to account; still may need to clear residual on terminal full fill
+
+        if delta <= 1e-12:
             if not partial and self.risk is not None and side == Side.BUY:
-                # Terminal: drop any residual reservation without re-recording notional
                 self.risk.release_reservation(intent.client_order_id or "")
             logger.info(
                 "event=fill_noop_already_accounted cid=%s cum=%.8f accounted=%.8f",
@@ -360,92 +371,166 @@ class ExecutionEngine:
             )
             return
 
-        if side == Side.BUY:
-            delta_notional = float(delta * avg) if avg > 0 else 0.0
-            if delta > 1e-12:
-                existing = self.positions.get(intent.symbol)
-                if existing and existing.amount > 0:
-                    total = existing.amount + delta
-                    wavg = (
-                        (existing.entry_price * existing.amount) + (avg * delta)
-                    ) / total if total > 0 else avg
-                    self.positions[intent.symbol] = PositionState(
-                        symbol=intent.symbol, base=base, quote=quote,
-                        amount=total, entry_price=wavg, opened_at=existing.opened_at,
-                    )
-                else:
-                    self.positions[intent.symbol] = PositionState(
-                        symbol=intent.symbol, base=base, quote=quote,
-                        amount=delta, entry_price=avg,
-                    )
-                self.positions_store.upsert(
-                    symbol=intent.symbol, base=base, quote=quote,
-                    amount=delta, entry_price=avg,
-                    order_id=result.id, client_order_id=intent.client_order_id or "",
-                )
+        event_id = make_event_id(intent.client_order_id or "", cumulative)
+        notional = float(delta * avg) if avg > 0 else 0.0
+        event = FillEvent(
+            event_id=event_id,
+            client_order_id=intent.client_order_id or "",
+            symbol=intent.symbol,
+            side=side.value,
+            delta=delta,
+            cumulative=cumulative,
+            average=avg,
+            notional=notional,
+            order_id=result.id or "",
+            partial=partial,
+            remaining=float(remaining or 0.0),
+            quote_amount=float(intent.quote_amount or 0.0),
+        )
 
-            # Persist accounted progress BEFORE risk commit (crash-safe watermark)
-            intent.accounted_filled = previously + delta
-            intent.filled = cumulative
-            self.intents.update(intent)
+        # Durable barrier FIRST — if already journaled, only ensure applied
+        is_new = self.fill_journal.try_record(event)
+        if not is_new:
+            if not self.fill_journal.is_applied(event_id):
+                self._apply_fill_event(event, intent=intent, base=base, quote=quote)
+            else:
+                # Fully done previously; sync watermark if lagging
+                if previously < cumulative:
+                    intent.accounted_filled = cumulative
+                    intent.filled = cumulative
+                    self.intents.update(intent)
+            return
+
+        self._apply_fill_event(event, intent=intent, base=base, quote=quote)
+
+    def _apply_fill_event(
+        self,
+        event: FillEvent,
+        *,
+        intent: OrderIntent | None = None,
+        base: str = "",
+        quote: str = "",
+    ) -> None:
+        """Idempotent side-effect application for a journaled fill event."""
+        if self.fill_journal.is_applied(event.event_id):
+            return
+
+        if intent is None:
+            intent = self.intents.by_client_id(event.client_order_id)
+        if "/" in event.symbol and (not base or not quote):
+            parts = event.symbol.split("/", 1)
+            base = base or parts[0]
+            quote = quote or parts[1]
+
+        side = Side.BUY if event.side == "buy" else Side.SELL
+        delta = float(event.delta)
+        avg = float(event.average)
+        cumulative = float(event.cumulative)
+
+        if side == Side.BUY and delta > 1e-12:
+            existing = self.positions.get(event.symbol)
+            if existing and existing.amount > 0:
+                total = existing.amount + delta
+                wavg = (
+                    (existing.entry_price * existing.amount) + (avg * delta)
+                ) / total if total > 0 else avg
+                self.positions[event.symbol] = PositionState(
+                    symbol=event.symbol, base=base, quote=quote,
+                    amount=total, entry_price=wavg, opened_at=existing.opened_at,
+                )
+            else:
+                self.positions[event.symbol] = PositionState(
+                    symbol=event.symbol, base=base, quote=quote,
+                    amount=delta, entry_price=avg,
+                )
+            self.positions_store.upsert(
+                symbol=event.symbol, base=base, quote=quote,
+                amount=delta, entry_price=avg,
+                order_id=event.order_id, client_order_id=event.client_order_id,
+                fill_event_id=event.event_id,
+            )
+
+            if intent is not None:
+                intent.accounted_filled = max(
+                    float(getattr(intent, "accounted_filled", 0.0) or 0.0), cumulative
+                )
+                intent.filled = max(float(intent.filled or 0.0), cumulative)
+                if avg > 0:
+                    intent.average = avg
+                self.intents.update(intent)
 
             if self.risk is not None:
-                if partial:
-                    quote_total = float(intent.quote_amount or 0.0)
-                    accounted_notional = float(intent.accounted_filled * avg) if avg > 0 else 0.0
+                if event.partial:
+                    quote_total = float(event.quote_amount or 0.0)
+                    accounted_notional = float(cumulative * avg) if avg > 0 else 0.0
                     residual = max(0.0, quote_total - accounted_notional)
-                    if residual <= 0 and remaining > 0 and avg > 0:
-                        residual = remaining * avg
+                    if residual <= 0 and event.remaining > 0 and avg > 0:
+                        residual = event.remaining * avg
                     self.risk.commit_partial_and_rereserve(
-                        intent.client_order_id or "",
+                        event.client_order_id,
                         side="buy",
-                        symbol=intent.symbol,
-                        filled_notional=delta_notional,
+                        symbol=event.symbol,
+                        filled_notional=float(event.notional),
                         remaining_reserve=residual,
                         pnl=0.0,
-                        order_id=result.id,
-                        client_order_id=intent.client_order_id or "",
+                        order_id=event.order_id,
+                        client_order_id=event.client_order_id,
+                        fill_event_id=event.event_id,
                     )
                 else:
-                    # Full fill: commit only the *unaccounted* delta notional, drop residual
                     self.risk.commit_reservation(
-                        intent.client_order_id or "",
+                        event.client_order_id,
                         side="buy",
-                        symbol=intent.symbol,
-                        actual_notional=delta_notional,
+                        symbol=event.symbol,
+                        actual_notional=float(event.notional),
                         pnl=0.0,
-                        order_id=result.id,
-                        client_order_id=intent.client_order_id or "",
+                        order_id=event.order_id,
+                        client_order_id=event.client_order_id,
+                        fill_event_id=event.event_id,
                     )
-            logger.info(
-                "event=fill_accounted cid=%s delta=%.8f cum=%.8f accounted=%.8f partial=%s",
-                intent.client_order_id, delta, cumulative, intent.accounted_filled, partial,
-            )
-        else:
-            if delta <= 1e-12:
-                return
-            entry = self.load_entry_price(intent.symbol) or avg
+        elif side == Side.SELL and delta > 1e-12:
+            entry = self.load_entry_price(event.symbol) or avg
             notional = delta * avg
             pnl = (avg - entry) * delta if entry > 0 else 0.0
-            self.positions_store.reduce_or_close(intent.symbol, delta)
-            if intent.symbol in self.positions:
-                left = self.positions[intent.symbol].amount - delta
+            self.positions_store.reduce_or_close(event.symbol, delta)
+            if event.symbol in self.positions:
+                left = self.positions[event.symbol].amount - delta
                 if left <= 1e-12:
-                    self.positions.pop(intent.symbol, None)
+                    self.positions.pop(event.symbol, None)
                 else:
-                    self.positions[intent.symbol].amount = left
-            intent.accounted_filled = previously + delta
-            intent.filled = cumulative
-            self.intents.update(intent)
+                    self.positions[event.symbol].amount = left
+            if intent is not None:
+                intent.accounted_filled = max(
+                    float(getattr(intent, "accounted_filled", 0.0) or 0.0), cumulative
+                )
+                intent.filled = max(float(intent.filled or 0.0), cumulative)
+                self.intents.update(intent)
             if self.risk is not None:
                 self.risk.record_fill(
                     side="sell",
-                    symbol=intent.symbol,
+                    symbol=event.symbol,
                     notional=notional,
                     pnl=pnl,
-                    order_id=result.id,
-                    client_order_id=intent.client_order_id or "",
+                    order_id=event.order_id,
+                    client_order_id=event.client_order_id,
+                    fill_event_id=event.event_id,
                 )
+
+        self.fill_journal.mark_applied(event.event_id)
+        logger.info(
+            "event=fill_applied id=%s delta=%.8f cum=%.8f partial=%s",
+            event.event_id, delta, cumulative, event.partial,
+        )
+
+    def _replay_unapplied_fills(self) -> None:
+        """Crash recovery: apply any journaled fill events not yet marked applied."""
+        pending = self.fill_journal.unapplied_events()
+        if not pending:
+            return
+        logger.warning("event=fill_journal_replay count=%d", len(pending))
+        for event in pending:
+            intent = self.intents.by_client_id(event.client_order_id)
+            self._apply_fill_event(event, intent=intent)
 
     def _reconcile(self, intent: OrderIntent, *, max_misses: int | None = None) -> None:
         if max_misses is not None:
