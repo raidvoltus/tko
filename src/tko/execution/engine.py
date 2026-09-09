@@ -93,20 +93,19 @@ class ExecutionEngine:
                 )
         return True, "ok"
 
-    def _assert_lifecycle_allows_submit(self) -> None:
-        """Final TOCTOU guard: reject submit if lifecycle is not READY (INV-33/47)."""
+    def _run_live_create_order(self, **kwargs):  # type: ignore[no-untyped-def]
+        """Race-safe LIVE POST: auth check + create_order under lifecycle submit mutex."""
         lc = self.lifecycle
         if lc is None:
-            return
-        authorized = getattr(lc, "trading_authorized", None)
-        if callable(authorized):
-            ok = bool(authorized())
-        else:
-            ok = bool(authorized)
-        if not ok:
-            state = getattr(lc, "state", None)
-            state_v = getattr(state, "value", state)
-            raise RuntimeError(f"lifecycle rejects submit: state={state_v}")
+            return self.client.create_order(**kwargs)
+        run = getattr(lc, "run_authorized_submit", None)
+        if run is None:
+            authorized = getattr(lc, "trading_authorized", False)
+            ok = bool(authorized() if callable(authorized) else authorized)
+            if not ok:
+                raise RuntimeError("lifecycle rejects submit: no run_authorized_submit")
+            return self.client.create_order(**kwargs)
+        return run(lambda: self.client.create_order(**kwargs))
 
     def buy(self, symbol: str, base: str, quote: str, decision: RiskDecision, last_price: float) -> OrderResult | None:
         if not decision.approved or decision.size_quote <= 0:
@@ -193,8 +192,7 @@ class ExecutionEngine:
         intent.attempts += 1
         self.intents.update(intent)
         try:
-            self._assert_lifecycle_allows_submit()
-            result = self.client.create_order(
+            result = self._run_live_create_order(
                 symbol=intent.symbol, side=side, amount=base_amount,
                 order_type=OrderType.MARKET, client_order_id=intent.client_order_id,
                 quote_amount=quote_amount if side == Side.BUY else None,
