@@ -5,6 +5,19 @@ from __future__ import annotations
 from tko.runtime.lifecycle import LifecycleGovernor, LifecycleState
 
 
+def _gates(**over):
+    base = dict(
+        recon_ok=True,
+        kill_switch_clear=True,
+        circuit_clear=True,
+        daily_risk_ok=True,
+        positions_ok=True,
+        exchange_ok=True,
+    )
+    base.update(over)
+    return base
+
+
 def test_halted_cannot_go_direct_ready():
     g = LifecycleGovernor()
     g.force(LifecycleState.HALTED, reason="fail")
@@ -15,7 +28,6 @@ def test_halted_cannot_go_direct_ready():
 
 
 def test_halted_recovery_path_to_ready():
-    """HALTED -> RECOVERY -> RECONCILING -> authorize_ready -> READY."""
     g = LifecycleGovernor()
     g.force(LifecycleState.HALTED, reason="startup_fail")
     assert g.begin_recovery(reason="auto")
@@ -24,7 +36,7 @@ def test_halted_recovery_path_to_ready():
     assert g.transition(LifecycleState.READY, reason="nope") is False
     assert g.complete_recovery_to_reconciling()
     assert g.state == LifecycleState.RECONCILING
-    assert g.authorize_ready(reason="recon_ok")
+    assert g.authorize_ready(reason="recon_ok", **_gates())
     assert g.trading_authorized is True
 
 
