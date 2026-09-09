@@ -11,7 +11,7 @@ import ccxt  # type: ignore
 from tko.core.credentials import TokocryptoCredentials
 from tko.core.types import Balance, OHLCV, OrderResult, OrderType, Side, Ticker
 from tko.exchange.constraints import MarketConstraints, extract_market_constraints
-from tko.exchange.order_response import InvalidOrderResponse, validate_order_payload
+from tko.exchange.order_response import InvalidOrderResponse, OrderLookupResult, validate_order_payload
 from tko.execution.errors import ErrorCategory, classify_exception, is_ambiguous
 
 logger = logging.getLogger(__name__)
@@ -198,8 +198,6 @@ class TokocryptoClient:
 
         Never collapses total query failure into NOT_FOUND.
         """
-        from tko.exchange.order_response import OrderLookupResult
-
         self.connect()
         errors: list[str] = []
         attempted = 0
