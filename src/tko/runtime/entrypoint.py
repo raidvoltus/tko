@@ -100,10 +100,10 @@ def cmd_run(_: argparse.Namespace) -> int:
         bot = bot_ref.get("bot")
         if bot is not None:
             try:
-                if hasattr(bot, "lifecycle") and hasattr(bot.lifecycle, "request_stop"):
+                if hasattr(bot, "request_shutdown"):
+                    bot.request_shutdown()
+                elif hasattr(bot, "lifecycle") and hasattr(bot.lifecycle, "request_stop"):
                     bot.lifecycle.request_stop()
-                bot._stop_requested = True
-                bot._running = False
             except Exception:
                 pass
         raise SystemExit(0)
@@ -215,9 +215,9 @@ def cmd_watchdog(args: argparse.Namespace) -> int:
 
 
 def cmd_install_service(args: argparse.Namespace) -> int:
-    from tko.runtime.windows_service import DEFAULT_TASK_NAME, install_scheduled_task
+    from tko.runtime.windows_service import DEFAULT_TASK_NAME, install_scheduled_task_xml
 
-    result = install_scheduled_task(
+    result = install_scheduled_task_xml(
         getattr(args, "task_name", None) or DEFAULT_TASK_NAME,
         force=bool(getattr(args, "force", False)),
         use_system=bool(getattr(args, "use_system", False)),
