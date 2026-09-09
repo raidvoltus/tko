@@ -3,6 +3,7 @@
 INV-20..INV-47: only READY may authorize LIVE trading.
 KILL is terminal for the current process session.
 DEGRADED may not jump directly to READY.
+Submit handoff is race-safe via _submit_mutex (concurrent TOCTOU closed).
 """
 
 from __future__ import annotations
@@ -12,9 +13,11 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 class LifecycleState(str, Enum):
@@ -39,11 +42,7 @@ TERMINAL_SESSION_STATES = frozenset(
 
 _TRANSITIONS: dict[LifecycleState, frozenset[LifecycleState]] = {
     LifecycleState.STARTING: frozenset(
-        {
-            LifecycleState.RECONCILING,
-            LifecycleState.HALTED,
-            LifecycleState.STOPPING,
-        }
+        {LifecycleState.RECONCILING, LifecycleState.HALTED, LifecycleState.STOPPING}
     ),
     LifecycleState.RECONCILING: frozenset(
         {
@@ -70,20 +69,10 @@ _TRANSITIONS: dict[LifecycleState, frozenset[LifecycleState]] = {
             LifecycleState.STOPPING,
         }
     ),
-    LifecycleState.KILL: frozenset(
-        {
-            LifecycleState.STOPPING,
-            LifecycleState.HALTED,
-        }
-    ),
+    LifecycleState.KILL: frozenset({LifecycleState.STOPPING, LifecycleState.HALTED}),
     LifecycleState.STOPPING: frozenset({LifecycleState.STOPPED}),
     LifecycleState.STOPPED: frozenset(),
-    LifecycleState.HALTED: frozenset(
-        {
-            LifecycleState.STOPPING,
-            LifecycleState.RECONCILING,
-        }
-    ),
+    LifecycleState.HALTED: frozenset({LifecycleState.STOPPING, LifecycleState.RECONCILING}),
 }
 
 
@@ -126,6 +115,8 @@ class LifecycleGovernor:
         self._last_tick_ts: float | None = None
         self._process_alive = True
         self._kill_sticky = False
+        # Serializes authorization check with create_order handoff (INV-33 concurrent TOCTOU).
+        self._submit_mutex = threading.Lock()
 
     @property
     def state(self) -> LifecycleState:
@@ -235,14 +226,38 @@ class LifecycleGovernor:
             )
 
     def request_stop(self) -> None:
-        """Signal-safe: immediately disable trading and enter STOPPING."""
-        with self._lock:
-            if self._state in (LifecycleState.STOPPED, LifecycleState.STOPPING):
-                return
-            prev = self._state
-            self._state = LifecycleState.STOPPING
-            self._reason = "shutdown_requested"
-            logger.info(
-                "event=runtime_stopping from=%s reason=shutdown_requested",
-                prev.value,
-            )
+        """Disable trading immediately. Takes submit mutex so no concurrent create_order can start."""
+        with self._submit_mutex:
+            with self._lock:
+                if self._state in (LifecycleState.STOPPED, LifecycleState.STOPPING):
+                    return
+                prev = self._state
+                self._state = LifecycleState.STOPPING
+                self._reason = "shutdown_requested"
+                logger.info(
+                    "event=runtime_stopping from=%s reason=shutdown_requested",
+                    prev.value,
+                )
+
+    def run_authorized_submit(self, submit_fn: Callable[[], T]) -> T:
+        """Atomically authorize and run submit_fn under the submit mutex (INV-33).
+
+        request_stop() also acquires this mutex, so either:
+        - stop wins first → this raises and create_order is never called, or
+        - submit wins first → stop waits until submit_fn returns.
+        There is no window where authorization is observed True then stop intervenes
+        before submit_fn is invoked.
+        """
+        with self._submit_mutex:
+            with self._lock:
+                if self._state != LifecycleState.READY or self._kill_sticky:
+                    raise RuntimeError(
+                        f"lifecycle rejects submit: state={self._state.value}"
+                    )
+            return submit_fn()
+
+    def try_run_authorized_submit(self, submit_fn: Callable[[], T]) -> T | None:
+        try:
+            return self.run_authorized_submit(submit_fn)
+        except RuntimeError:
+            return None
