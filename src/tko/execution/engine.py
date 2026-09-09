@@ -85,7 +85,8 @@ class ExecutionEngine:
         if self.s.max_order_notional > 0 and notional > float(self.s.max_order_notional) + 1e-9:
             return False, f"notional {notional:.4f} exceeds max_order_notional {self.s.max_order_notional:.4f}"
         if self.risk is not None and self.s.max_daily_notional > 0:
-            used = self.risk.pnl.today_notional()
+            # S5-B1: count outstanding reservations so concurrent paths cannot overshoot
+            used = self.risk.effective_daily_used()
             if used + notional > float(self.s.max_daily_notional) + 1e-9:
                 return False, (
                     f"daily notional {used:.4f}+{notional:.4f} exceeds "
@@ -141,6 +142,18 @@ class ExecutionEngine:
         if intent is None:
             logger.warning("event=order_retry_blocked symbol=%s side=buy reason=active_intent", symbol)
             return None
+        # S5-B1: atomic reserve BEFORE SUBMITTING / LIVE POST
+        if self.risk is not None and float(quote_amt) > 0:
+            ok_r, r_reason = self.risk.try_reserve_notional(
+                float(quote_amt), reservation_id=intent.client_order_id
+            )
+            if not ok_r:
+                intent.status = OrderIntentStatus.REJECTED
+                intent.error_category = "RISK_RESERVE"
+                intent.error_message = r_reason[:300]
+                self.intents.update(intent)
+                logger.error("event=notional_reserve_failed symbol=%s reason=%s", symbol, r_reason)
+                return None
         est_base = float(quote_amt / Decimal(str(last_price))) if last_price > 0 else 0.0
         intent.status = OrderIntentStatus.NORMALIZED
         intent.normalized_base = est_base
@@ -207,19 +220,25 @@ class ExecutionEngine:
             intent.error_category = "LIFECYCLE"
             intent.error_message = str(exc)[:300]
             self.intents.update(intent)
+            if self.risk is not None:
+                self.risk.release_reservation(intent.client_order_id)
             return None
         except TokocryptoError as exc:
             intent.error_category = exc.category.value
             intent.error_message = str(exc)[:300]
             if exc.ambiguous or is_ambiguous(exc.category):
+                # UNKNOWN: KEEP reservation (order may exist on exchange)
                 intent.status = OrderIntentStatus.UNKNOWN
                 self.intents.update(intent)
                 self._reconcile(intent)
                 if intent.status == OrderIntentStatus.CONFIRMED:
                     return self._result_from_intent(intent, side)
                 return None
+            # Definitive reject: RELEASE reservation
             intent.status = OrderIntentStatus.REJECTED
             self.intents.update(intent)
+            if self.risk is not None:
+                self.risk.release_reservation(intent.client_order_id)
             if self.metrics is not None:
                 try:
                     self.metrics.record_order(success=False)  # type: ignore[attr-defined]
@@ -227,6 +246,7 @@ class ExecutionEngine:
                     pass
             return None
         except Exception as exc:
+            # Ambiguous exception: KEEP reservation, go UNKNOWN
             intent.status = OrderIntentStatus.UNKNOWN
             intent.error_category = ErrorCategory.UNKNOWN_ERROR.value
             intent.error_message = str(exc)[:300]
@@ -270,8 +290,16 @@ class ExecutionEngine:
                 order_id=result.id, client_order_id=intent.client_order_id or "",
             )
             if self.risk is not None:
-                self.risk.record_fill(side="buy", symbol=intent.symbol, notional=notional, pnl=0.0,
-                                      order_id=result.id, client_order_id=intent.client_order_id or "")
+                # S5-B1: commit reservation + durable PnL in one locked step
+                self.risk.commit_reservation(
+                    intent.client_order_id or "",
+                    side="buy",
+                    symbol=intent.symbol,
+                    actual_notional=notional,
+                    pnl=0.0,
+                    order_id=result.id,
+                    client_order_id=intent.client_order_id or "",
+                )
         else:
             entry = self.load_entry_price(intent.symbol) or avg
             notional = filled * avg
@@ -284,8 +312,15 @@ class ExecutionEngine:
                 else:
                     self.positions[intent.symbol].amount = left
             if self.risk is not None:
-                self.risk.record_fill(side="sell", symbol=intent.symbol, notional=notional, pnl=pnl,
-                                      order_id=result.id, client_order_id=intent.client_order_id or "")
+                # Sells do not consume daily-notional BUY budget; still durable-record
+                self.risk.record_fill(
+                    side="sell",
+                    symbol=intent.symbol,
+                    notional=notional,
+                    pnl=pnl,
+                    order_id=result.id,
+                    client_order_id=intent.client_order_id or "",
+                )
 
     def _reconcile(self, intent: OrderIntent, *, max_misses: int | None = None) -> None:
         if max_misses is not None:
