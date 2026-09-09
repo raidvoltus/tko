@@ -1,7 +1,8 @@
 """Runtime lifecycle state machine — trading authorization gate (Stage 4).
 
 INV-20..INV-47: only READY may authorize LIVE trading.
-KILL is terminal for the current process session.
+KILL is a hard safety state: no direct KILL->READY.
+Autonomous recovery: KILL|HALTED|DEGRADED -> RECOVERY -> RECONCILING -> READY only after validation.
 DEGRADED/HALTED may not jump directly to READY.
 Autonomous recovery: HALTED|DEGRADED -> RECOVERY -> RECONCILING -> READY.
 Submit handoff is race-safe via _submit_mutex (concurrent TOCTOU closed).
@@ -72,7 +73,13 @@ _TRANSITIONS: dict[LifecycleState, frozenset[LifecycleState]] = {
             LifecycleState.STOPPING,
         }
     ),
-    LifecycleState.KILL: frozenset({LifecycleState.STOPPING, LifecycleState.HALTED}),
+    LifecycleState.KILL: frozenset(
+        {
+            LifecycleState.RECOVERY,  # autonomous recovery only — never READY direct
+            LifecycleState.STOPPING,
+            LifecycleState.HALTED,
+        }
+    ),
     LifecycleState.STOPPING: frozenset({LifecycleState.STOPPED}),
     LifecycleState.STOPPED: frozenset(),
     # Full autonomous: HALTED is not a human dead-end, but cannot jump to READY.
@@ -248,27 +255,62 @@ class LifecycleGovernor:
             )
 
     def begin_recovery(self, *, reason: str = "autonomous_recovery") -> bool:
-        """HALTED/DEGRADED -> RECOVERY (never READY). Caller must then RECONCILING."""
+        """KILL/HALTED/DEGRADED -> RECOVERY (never READY). kill_sticky stays until authorize_ready.
+
+        Full autonomous path:
+            KILL|HALTED|DEGRADED -> RECOVERY -> RECONCILING -> authorize_ready -> READY
+        """
         with self._lock:
-            if self._state == LifecycleState.DEGRADED:
-                return self.transition(LifecycleState.RECOVERY, reason=reason)
-            if self._state == LifecycleState.HALTED:
-                if LifecycleState.RECOVERY not in _TRANSITIONS.get(self._state, frozenset()):
-                    return False
-                prev = self._state
-                self._state = LifecycleState.RECOVERY
-                self._reason = reason[:300]
-                logger.info(
-                    "event=runtime_recovery from=%s reason=%s",
-                    prev.value,
-                    reason[:200],
-                )
-                return True
-            return False
+            if self._state not in (
+                LifecycleState.KILL,
+                LifecycleState.HALTED,
+                LifecycleState.DEGRADED,
+            ):
+                return False
+            if LifecycleState.RECOVERY not in _TRANSITIONS.get(self._state, frozenset()):
+                return False
+            prev = self._state
+            self._state = LifecycleState.RECOVERY
+            self._reason = reason[:300]
+            # kill_sticky remains True until authorize_ready() — no bypass
+            logger.info(
+                "event=runtime_recovery from=%s reason=%s kill_sticky=%s",
+                prev.value,
+                reason[:200],
+                self._kill_sticky,
+            )
+            return True
 
     def complete_recovery_to_reconciling(self, *, reason: str = "recovery_recon") -> bool:
-        """RECOVERY -> RECONCILING only. READY requires successful recon after this."""
+        """RECOVERY -> RECONCILING only. READY requires authorize_ready after validation."""
         return self.transition(LifecycleState.RECONCILING, reason=reason)
+
+    def authorize_ready(self, *, reason: str = "recovery_validated") -> bool:
+        """Sole path from RECONCILING to READY that may clear kill_sticky.
+
+        Requires state == RECONCILING. Clears kill_sticky only here so KILL cannot
+        become READY without explicit post-recovery authorization after reconciliation.
+        """
+        with self._lock:
+            if self._state != LifecycleState.RECONCILING:
+                logger.warning(
+                    "event=lifecycle_authorize_ready_rejected state=%s",
+                    self._state.value,
+                )
+                return False
+            prev = self._state
+            was_sticky = self._kill_sticky
+            self._kill_sticky = False
+            self._state = LifecycleState.READY
+            self._reason = reason[:300]
+            self._last_successful_recon_ts = time.time()
+            logger.info(
+                "event=runtime_ready from=%s reason=%s cleared_kill_sticky=%s",
+                prev.value,
+                reason[:200],
+                was_sticky,
+            )
+            return True
 
     def request_stop(self) -> None:
         """Disable trading immediately. Takes submit mutex so no concurrent create_order can start."""
