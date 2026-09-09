@@ -79,6 +79,8 @@ class OrderIntent:
     attempts: int = 0
     exchange_order_id: str = ""
     filled: float = 0.0
+    # S5-B3: cumulative exchange fill already applied to position/PnL (exactly-once)
+    accounted_filled: float = 0.0
     average: float | None = None
     error_category: str = ""
     error_message: str = ""
@@ -114,6 +116,7 @@ class OrderIntent:
             attempts=int(data.get("attempts") or 0),
             exchange_order_id=str(data.get("exchange_order_id") or ""),
             filled=float(data.get("filled") or 0.0),
+            accounted_filled=float(data.get("accounted_filled") or 0.0),
             average=(float(data["average"]) if data.get("average") is not None else None),
             error_category=str(data.get("error_category") or ""),
             error_message=str(data.get("error_message") or ""),
