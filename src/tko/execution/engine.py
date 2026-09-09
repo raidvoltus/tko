@@ -94,17 +94,21 @@ class ExecutionEngine:
         return True, "ok"
 
     def _run_live_create_order(self, **kwargs):  # type: ignore[no-untyped-def]
-        """Race-safe LIVE POST: auth check + create_order under lifecycle submit mutex."""
+        """Race-safe LIVE POST: MUST go through LifecycleGovernor.run_authorized_submit.
+
+        Fail-closed: no lifecycle, or lifecycle without run_authorized_submit → no POST.
+        Never: trading_authorized boolean check then direct create_order (TOCTOU bypass).
+        """
         lc = self.lifecycle
         if lc is None:
-            return self.client.create_order(**kwargs)
+            raise RuntimeError(
+                "lifecycle required for LIVE create_order (fail-closed: no authorization gate)"
+            )
         run = getattr(lc, "run_authorized_submit", None)
-        if run is None:
-            authorized = getattr(lc, "trading_authorized", False)
-            ok = bool(authorized() if callable(authorized) else authorized)
-            if not ok:
-                raise RuntimeError("lifecycle rejects submit: no run_authorized_submit")
-            return self.client.create_order(**kwargs)
+        if run is None or not callable(run):
+            raise RuntimeError(
+                "lifecycle.run_authorized_submit required for LIVE create_order (fail-closed)"
+            )
         return run(lambda: self.client.create_order(**kwargs))
 
     def buy(self, symbol: str, base: str, quote: str, decision: RiskDecision, last_price: float) -> OrderResult | None:
@@ -222,10 +226,10 @@ class ExecutionEngine:
                 except Exception:
                     pass
             return None
-        except Exception as exc:
+        except Exception as exp:
             intent.status = OrderIntentStatus.UNKNOWN
             intent.error_category = ErrorCategory.UNKNOWN_ERROR.value
-            intent.error_message = str(exc)[:300]
+            intent.error_message = str(exp)[:300]
             self.intents.update(intent)
             self._reconcile(intent)
             if intent.status == OrderIntentStatus.CONFIRMED:
