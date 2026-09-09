@@ -56,8 +56,7 @@ class TradingBot:
         self._running = False
         self._last_reconcile = 0.0
         self._stop_requested = False
-        self._recovery_attempts = 0
-        self._max_recovery_attempts = 3
+        self._recovery_attempts = 0  # monotonically increases for backoff only (INV-54)
 
     def _hb(self, status: str | None = None) -> None:
         snap = self.lifecycle.snapshot()
@@ -72,6 +71,11 @@ class TradingBot:
                 "last_tick_ts": snap.last_tick_ts,
             },
         )
+
+    def _recovery_backoff_sec(self) -> float:
+        """Bounded exponential backoff for autonomous recovery (INV-54). Never stops retrying."""
+        exp = min(max(self._recovery_attempts - 1, 0), 6)
+        return float(min(60.0, max(1.0, (2 ** exp) * max(1.0, self.s.loop_interval_sec / 5.0))))
 
     def _halt(self, reason: str) -> None:
         self.lifecycle.force(LifecycleState.HALTED, reason=reason)
@@ -114,21 +118,50 @@ class TradingBot:
         except Exception as exc:
             self._halt(f"startup_reconciliation_failed:{exc}")
             return False
+        recon_ok = True
+        positions_ok = True
+        exchange_ok = True
+
         if self.risk.kill_switch_active():
             self.lifecycle.transition(LifecycleState.KILL, reason="kill_switch_active_on_startup")
             self._hb("KILL")
             self.metrics.set_status("KILL")
             self.audit.record("ERROR", reason="kill_switch_active_on_startup")
             return False
+        kill_switch_clear = True
+
         if self.client.circuit_open:
             self._halt(f"circuit_open:{self.client.circuit_reason}")
             return False
-        # Sole authorized entry to READY (clears kill_sticky after full validation)
-        if not self.lifecycle.authorize_ready(reason="startup_ok"):
-            self._halt("cannot_enter_ready")
-            return False
+        circuit_clear = True
+
+        # PnL + daily loss validation BEFORE READY (INV-51)
         day = self.pnl.stats_for_day()
         self.metrics.update_pnl(day.day, day.realized_pnl, day.notional_traded)
+        breach = self.risk.check_daily_limits_or_kill()
+        if breach:
+            self.lifecycle.transition(LifecycleState.KILL, reason=breach)
+            self._hb("KILL")
+            self.metrics.set_status("KILL", breach)
+            self.audit.record("ERROR", reason=f"daily_risk_block:{breach[:200]}")
+            try:
+                self.notify.send(f"TKO KILL (pre-ready risk): {breach[:300]}")
+            except Exception:
+                pass
+            return False
+        daily_risk_ok = True
+
+        if not self.lifecycle.authorize_ready(
+            reason="startup_ok",
+            recon_ok=recon_ok,
+            kill_switch_clear=kill_switch_clear,
+            circuit_clear=circuit_clear,
+            daily_risk_ok=daily_risk_ok,
+            positions_ok=positions_ok,
+            exchange_ok=exchange_ok,
+        ):
+            self._halt("cannot_enter_ready:validation_gates_failed")
+            return False
         self.metrics.set_status("OK")
         self._hb("READY")
         self.audit.record("DECISION", reason="runtime_ready", extra={"day": day.day})
@@ -143,32 +176,34 @@ class TradingBot:
         self._running = True
         self._stop_requested = False
         self._recovery_attempts = 0
-        self._max_recovery_attempts = 3
         if not self._startup_barrier():
             logger.error("Startup barrier failed - autonomous recovery may retry")
             while self._running and not self._stop_requested:
                 self._hb()
-                if self.lifecycle.state == LifecycleState.HALTED and self._recovery_attempts < self._max_recovery_attempts:
-                    self._recovery_attempts += 1
-                    if self.lifecycle.begin_recovery(reason=f"startup_recovery_{self._recovery_attempts}"):
-                        self.lifecycle.complete_recovery_to_reconciling(reason="startup_recovery_recon")
-                        if self._startup_barrier():
-                            self._recovery_attempts = 0
-                            break
-                elif self.lifecycle.state in (LifecycleState.STOPPING, LifecycleState.STOPPED):
+                if self.lifecycle.state in (LifecycleState.STOPPING, LifecycleState.STOPPED):
                     return
-                elif self.lifecycle.state == LifecycleState.KILL:
-                    if self._recovery_attempts >= self._max_recovery_attempts:
-                        return
-                    if self.risk.kill_switch_active():
-                        time.sleep(self.s.loop_interval_sec)
-                        continue
+                if self.lifecycle.state in (LifecycleState.HALTED, LifecycleState.KILL, LifecycleState.RECOVERY):
                     self._recovery_attempts += 1
-                    if self.lifecycle.begin_recovery(reason=f"startup_kill_recovery_{self._recovery_attempts}"):
-                        self.lifecycle.complete_recovery_to_reconciling(reason="startup_kill_recovery_recon")
+                    backoff = self._recovery_backoff_sec()
+                    logger.warning(
+                        "event=autonomous_recovery phase=startup attempt=%s backoff=%.1fs state=%s",
+                        self._recovery_attempts,
+                        backoff,
+                        self.lifecycle.state.value,
+                    )
+                    time.sleep(backoff)
+                    if self.lifecycle.state == LifecycleState.KILL and self.risk.kill_switch_active():
+                        logger.warning("event=kill_recovery_blocked reason=kill_switch_still_active")
+                        continue
+                    if self.lifecycle.state == LifecycleState.RECOVERY:
+                        self.lifecycle.complete_recovery_to_reconciling(reason="startup_recovery_progress")
+                    elif self.lifecycle.begin_recovery(reason=f"startup_recovery_{self._recovery_attempts}"):
+                        self.lifecycle.complete_recovery_to_reconciling(reason="startup_recovery_recon")
+                    if self.lifecycle.state in (LifecycleState.RECONCILING, LifecycleState.STARTING):
                         if self._startup_barrier():
                             self._recovery_attempts = 0
                             break
+                    continue
                 time.sleep(self.s.loop_interval_sec)
             else:
                 return
@@ -177,49 +212,37 @@ class TradingBot:
                 if not self.lifecycle.trading_authorized:
                     self._hb()
                     if self.lifecycle.state == LifecycleState.KILL:
-                        # Hard safety: stop new orders, but allow bounded autonomous recovery.
-                        # KILL -> RECOVERY -> RECONCILING -> risk/recon barrier -> READY
-                        # Never KILL -> READY direct. If kill_switch still active, barrier fails.
-                        if self._recovery_attempts < self._max_recovery_attempts:
-                            self._recovery_attempts += 1
-                            backoff = min(60.0, self.s.loop_interval_sec * (2 ** (self._recovery_attempts - 1)))
-                            logger.warning(
-                                "event=kill_autonomous_recovery attempt=%s/%s backoff=%.1fs",
-                                self._recovery_attempts,
-                                self._max_recovery_attempts,
-                                backoff,
-                            )
-                            time.sleep(backoff)
-                            if self.risk.kill_switch_active():
-                                logger.warning("event=kill_recovery_blocked reason=kill_switch_still_active")
-                                continue
-                            if self.lifecycle.begin_recovery(reason=f"kill_recovery_{self._recovery_attempts}"):
-                                self.lifecycle.complete_recovery_to_reconciling(
-                                    reason="kill_recovery_recon"
-                                )
-                                if self._startup_barrier():
-                                    self._recovery_attempts = 0
-                                    continue
-                        time.sleep(self.s.loop_interval_sec)
+                        self._recovery_attempts += 1
+                        backoff = self._recovery_backoff_sec()
+                        logger.warning(
+                            "event=kill_autonomous_recovery attempt=%s backoff=%.1fs",
+                            self._recovery_attempts,
+                            backoff,
+                        )
+                        time.sleep(backoff)
+                        if self.risk.kill_switch_active():
+                            logger.warning("event=kill_recovery_blocked reason=kill_switch_still_active")
+                            continue
+                        if self.lifecycle.begin_recovery(reason=f"kill_recovery_{self._recovery_attempts}"):
+                            self.lifecycle.complete_recovery_to_reconciling(reason="kill_recovery_recon")
+                            if self._startup_barrier():
+                                self._recovery_attempts = 0
                         continue
                     if self.lifecycle.state in (LifecycleState.STOPPING, LifecycleState.STOPPED):
                         break
                     if self.lifecycle.state == LifecycleState.HALTED:
-                        if self._recovery_attempts < self._max_recovery_attempts:
-                            self._recovery_attempts += 1
-                            logger.warning(
-                                "event=autonomous_recovery attempt=%s/%s",
-                                self._recovery_attempts,
-                                self._max_recovery_attempts,
-                            )
-                            if self.lifecycle.begin_recovery(reason=f"auto_recovery_{self._recovery_attempts}"):
-                                self.lifecycle.complete_recovery_to_reconciling(
-                                    reason="auto_recovery_recon"
-                                )
-                                if self._startup_barrier():
-                                    self._recovery_attempts = 0
-                                    continue
-                        time.sleep(self.s.loop_interval_sec)
+                        self._recovery_attempts += 1
+                        backoff = self._recovery_backoff_sec()
+                        logger.warning(
+                            "event=autonomous_recovery attempt=%s backoff=%.1fs",
+                            self._recovery_attempts,
+                            backoff,
+                        )
+                        time.sleep(backoff)
+                        if self.lifecycle.begin_recovery(reason=f"auto_recovery_{self._recovery_attempts}"):
+                            self.lifecycle.complete_recovery_to_reconciling(reason="auto_recovery_recon")
+                            if self._startup_barrier():
+                                self._recovery_attempts = 0
                         continue
                     if self.lifecycle.state == LifecycleState.RECOVERY:
                         self.lifecycle.complete_recovery_to_reconciling(reason="recovery_progress")
@@ -271,7 +294,6 @@ class TradingBot:
                 self.stop()
 
     def request_shutdown(self) -> None:
-        """Public cooperative stop request (signal-safe). Lifecycle is sole authority."""
         self.lifecycle.request_stop()
         self._stop_requested = True
         self._running = False
@@ -366,7 +388,7 @@ class TradingBot:
                 ticker = self.client.fetch_ticker(symbol)
                 last = float(ticker.last or 0)
             except Exception as exc:
-                logger.warning("market data failed %s: %s", symbol, exc)
+                logger.warning("market data failed %s: %s", symbol, exp)
                 continue
             if last <= 0:
                 continue
