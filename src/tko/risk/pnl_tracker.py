@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -119,6 +120,11 @@ class DailyPnLTracker:
             try:
                 with self.path.open("a", encoding="utf-8") as fh:
                     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    fh.flush()
+                    try:
+                        os.fsync(fh.fileno())
+                    except OSError:
+                        pass
             except OSError as exc:
                 logger.error("Failed to append PnL event: %s", exc)
             self._realized_by_day[day] = self._realized_by_day.get(day, 0.0) + float(pnl)
