@@ -15,7 +15,7 @@ def test_halted_cannot_go_direct_ready():
 
 
 def test_halted_recovery_path_to_ready():
-    """HALTED -> RECOVERY -> RECONCILING -> READY (full autonomous, no human)."""
+    """HALTED -> RECOVERY -> RECONCILING -> authorize_ready -> READY."""
     g = LifecycleGovernor()
     g.force(LifecycleState.HALTED, reason="startup_fail")
     assert g.begin_recovery(reason="auto")
@@ -24,12 +24,11 @@ def test_halted_recovery_path_to_ready():
     assert g.transition(LifecycleState.READY, reason="nope") is False
     assert g.complete_recovery_to_reconciling()
     assert g.state == LifecycleState.RECONCILING
-    assert g.transition(LifecycleState.READY, reason="recon_ok")
+    assert g.authorize_ready(reason="recon_ok")
     assert g.trading_authorized is True
 
 
 def test_halted_no_direct_reconciling():
-    """Direct HALTED -> RECONCILING removed; must go via RECOVERY."""
     g = LifecycleGovernor()
     g.force(LifecycleState.HALTED, reason="x")
     assert g.transition(LifecycleState.RECONCILING, reason="skip") is False
