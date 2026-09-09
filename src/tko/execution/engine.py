@@ -58,6 +58,15 @@ class ExecutionEngine:
             max_unknown_checks=5,
         )
         self._hydrate_positions_memory()
+        # S5-Recovery: rebuild in-memory reservations from durable BUY intents
+        if self.risk is not None:
+            try:
+                holding = self.intents.buy_intents_holding_budget()
+                n = self.risk.rehydrate_reservations_from_intents(holding)
+                if n:
+                    logger.info("event=startup_reservation_rehydrate count=%d", n)
+            except Exception as exc:
+                logger.warning("reservation rehydrate failed: %s", exc)
 
     def _hydrate_positions_memory(self) -> None:
         for pos in self.positions_store.all():
@@ -76,7 +85,21 @@ class ExecutionEngine:
         return None
 
     def reconcile_pending(self) -> None:
-        for intent in list(self.intents.unresolved_unknown()):
+        """Reconcile UNKNOWN/RECON/PARTIAL and crash-orphaned SUBMITTING intents."""
+        pending = list(self.intents.unresolved_for_recovery())
+        for intent in pending:
+            # Promote SUBMITTING → UNKNOWN so recon authority owns the lifecycle
+            if intent.status == OrderIntentStatus.SUBMITTING:
+                intent.status = OrderIntentStatus.UNKNOWN
+                intent.error_category = intent.error_category or "RECOVERY"
+                intent.error_message = (
+                    intent.error_message or "promoted from SUBMITTING on recovery"
+                )
+                self.intents.update(intent)
+                logger.warning(
+                    "event=submitting_promoted_to_unknown cid=%s",
+                    intent.client_order_id,
+                )
             self._reconcile(intent)
 
     def _precheck_notional(self, notional: float, *, side: str) -> tuple[bool, str]:
@@ -255,10 +278,38 @@ class ExecutionEngine:
             if intent.status == OrderIntentStatus.CONFIRMED:
                 return self._result_from_intent(intent, side)
             return None
-        intent.status = OrderIntentStatus.CONFIRMED
+        # S5-W2: distinguish full fill vs partial / still-open
         intent.exchange_order_id = result.id
-        intent.filled = result.filled
+        intent.filled = float(result.filled or 0.0)
         intent.average = result.average
+        st = (result.status or "").lower()
+        remaining = float(result.remaining or 0.0)
+        is_partial = remaining > 1e-12 and st in (
+            "open", "partial", "partially_filled", "new", "accepted", "pending",
+        )
+        if is_partial:
+            intent.status = OrderIntentStatus.PARTIALLY_FILLED
+            self.intents.update(intent)
+            logger.warning(
+                "event=partial_fill cid=%s filled=%.8f remaining=%.8f status=%s",
+                intent.client_order_id, intent.filled, remaining, result.status,
+            )
+            if self.audit is not None:
+                try:
+                    self.audit.record(  # type: ignore[attr-defined]
+                        "ORDER_PARTIAL", symbol=intent.symbol, side=side.value,
+                        client_order_id=intent.client_order_id or "",
+                        exchange_order_id=result.id, quantity=result.filled,
+                        price=result.average, reason=f"remaining={remaining}",
+                    )
+                except Exception:
+                    pass
+            self._on_fill_confirmed(
+                intent, side, result, base=base, quote=quote, partial=True, remaining=remaining
+            )
+            return result
+
+        intent.status = OrderIntentStatus.CONFIRMED
         self.intents.update(intent)
         if self.audit is not None:
             try:
@@ -274,32 +325,74 @@ class ExecutionEngine:
                 self.metrics.record_order(success=True)  # type: ignore[attr-defined]
             except Exception:
                 pass
-        self._on_fill_confirmed(intent, side, result, base=base, quote=quote)
+        self._on_fill_confirmed(intent, side, result, base=base, quote=quote, partial=False)
         return result
 
-    def _on_fill_confirmed(self, intent: OrderIntent, side: Side, result: OrderResult, *, base: str, quote: str) -> None:
+    def _on_fill_confirmed(
+        self,
+        intent: OrderIntent,
+        side: Side,
+        result: OrderResult,
+        *,
+        base: str,
+        quote: str,
+        partial: bool = False,
+        remaining: float = 0.0,
+    ) -> None:
         avg = result.average or intent.last_price or 0.0
-        filled = result.filled or intent.normalized_base or intent.base_amount or 0.0
+        filled = float(result.filled or intent.normalized_base or intent.base_amount or 0.0)
         if side == Side.BUY:
-            notional = float(intent.quote_amount or (filled * avg))
-            self.positions[intent.symbol] = PositionState(
-                symbol=intent.symbol, base=base, quote=quote, amount=filled, entry_price=avg
-            )
+            filled_notional = float(filled * avg) if avg > 0 else float(intent.quote_amount or 0.0)
+            # Accumulate memory position (match PositionStore.upsert semantics)
+            existing = self.positions.get(intent.symbol)
+            if existing and existing.amount > 0 and filled > 0:
+                total = existing.amount + filled
+                if total > 0:
+                    wavg = (
+                        (existing.entry_price * existing.amount) + (avg * filled)
+                    ) / total
+                else:
+                    wavg = avg
+                self.positions[intent.symbol] = PositionState(
+                    symbol=intent.symbol, base=base, quote=quote,
+                    amount=total, entry_price=wavg, opened_at=existing.opened_at,
+                )
+            else:
+                self.positions[intent.symbol] = PositionState(
+                    symbol=intent.symbol, base=base, quote=quote,
+                    amount=filled, entry_price=avg,
+                )
             self.positions_store.upsert(
                 symbol=intent.symbol, base=base, quote=quote, amount=filled, entry_price=avg,
                 order_id=result.id, client_order_id=intent.client_order_id or "",
             )
             if self.risk is not None:
-                # S5-B1: commit reservation + durable PnL in one locked step
-                self.risk.commit_reservation(
-                    intent.client_order_id or "",
-                    side="buy",
-                    symbol=intent.symbol,
-                    actual_notional=notional,
-                    pnl=0.0,
-                    order_id=result.id,
-                    client_order_id=intent.client_order_id or "",
-                )
+                if partial:
+                    # Account filled portion; keep residual reservation for open remainder
+                    quote_total = float(intent.quote_amount or 0.0)
+                    residual = max(0.0, quote_total - filled_notional)
+                    if residual <= 0 and remaining > 0 and avg > 0:
+                        residual = remaining * avg
+                    self.risk.commit_partial_and_rereserve(
+                        intent.client_order_id or "",
+                        side="buy",
+                        symbol=intent.symbol,
+                        filled_notional=filled_notional,
+                        remaining_reserve=residual,
+                        pnl=0.0,
+                        order_id=result.id,
+                        client_order_id=intent.client_order_id or "",
+                    )
+                else:
+                    self.risk.commit_reservation(
+                        intent.client_order_id or "",
+                        side="buy",
+                        symbol=intent.symbol,
+                        actual_notional=filled_notional or float(intent.quote_amount or 0.0),
+                        pnl=0.0,
+                        order_id=result.id,
+                        client_order_id=intent.client_order_id or "",
+                    )
         else:
             entry = self.load_entry_price(intent.symbol) or avg
             notional = filled * avg
@@ -312,7 +405,6 @@ class ExecutionEngine:
                 else:
                     self.positions[intent.symbol].amount = left
             if self.risk is not None:
-                # Sells do not consume daily-notional BUY budget; still durable-record
                 self.risk.record_fill(
                     side="sell",
                     symbol=intent.symbol,
@@ -345,9 +437,28 @@ class ExecutionEngine:
             intent.error_message = refreshed.error_message
 
     def _result_from_intent(self, intent: OrderIntent, side: Side) -> OrderResult:
+        """Build OrderResult from intent without inventing a full-fill when partial."""
+        amount = float(intent.normalized_base or intent.base_amount or 0.0)
+        filled = float(intent.filled or 0.0)
+        if intent.status == OrderIntentStatus.PARTIALLY_FILLED:
+            remaining = max(0.0, amount - filled) if amount > 0 else 0.0
+            status = "open"
+        elif intent.status == OrderIntentStatus.CONFIRMED:
+            remaining = 0.0
+            status = "closed"
+        else:
+            remaining = max(0.0, amount - filled) if amount > 0 else 0.0
+            status = "unknown"
         return OrderResult(
-            id=intent.exchange_order_id or "", symbol=intent.symbol, side=side,
-            type=OrderType.MARKET, amount=intent.normalized_base or intent.base_amount or 0.0,
-            price=intent.average, status="closed", filled=intent.filled or 0.0,
-            remaining=0.0, average=intent.average, client_order_id=intent.client_order_id,
+            id=intent.exchange_order_id or "",
+            symbol=intent.symbol,
+            side=side,
+            type=OrderType.MARKET,
+            amount=amount,
+            price=intent.average,
+            status=status,
+            filled=filled,
+            remaining=remaining,
+            average=intent.average,
+            client_order_id=intent.client_order_id,
         )
