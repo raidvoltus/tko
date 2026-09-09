@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -24,6 +23,20 @@ def _gates(**over):
     return base
 
 
+def _to_ready(g, *, reason: str = "test_ready") -> None:
+    """Test-only: reach READY solely via authorize_ready (never force)."""
+    if g.state != LifecycleState.RECONCILING:
+        if g.state == LifecycleState.STARTING:
+            assert g.transition(LifecycleState.RECONCILING, reason="to_recon")
+        else:
+            raise AssertionError(f"cannot _to_ready from {g.state}")
+    assert g.authorize_ready(
+        reason=reason,
+        recon_ok=True, kill_switch_clear=True, circuit_clear=True,
+        daily_risk_ok=True, positions_ok=True, exchange_ok=True,
+    )
+
+
 def test_inv21_only_ready_authorizes():
     g = LifecycleGovernor()
     assert g.state == LifecycleState.STARTING
@@ -39,7 +52,7 @@ def test_inv21_only_ready_authorizes():
 
 def test_inv25_stopping_blocks():
     g = LifecycleGovernor()
-    g.force(LifecycleState.READY, reason="x")
+    _to_ready(g, reason="x")
     g.force(LifecycleState.STOPPING, reason="sig")
     assert g.trading_authorized is False
     g.force(LifecycleState.STOPPED, reason="done")
