@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import threading
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -140,9 +138,14 @@ def test_inv42_stopping_disables_trading_immediately():
 
 
 def test_inv44_xml_contains_ignore_new():
-    from tko.runtime.windows_service import build_task_xml
+    from tko.runtime.windows_service import ServicePlan, build_task_xml
 
-    xml = build_task_xml("C:\\tko\\tko.exe", "C:\\tko")
+    plan = ServicePlan(
+        task_name="TKO",
+        command_line="C:\\tko\\tko.exe run",
+        working_directory="C:\\tko",
+    )
+    xml = build_task_xml(plan)
     assert "IgnoreNew" in xml
     assert "RestartOnFailure" in xml
 
