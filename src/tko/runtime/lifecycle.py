@@ -2,7 +2,8 @@
 
 INV-20..INV-47: only READY may authorize LIVE trading.
 KILL is terminal for the current process session.
-DEGRADED may not jump directly to READY.
+DEGRADED/HALTED may not jump directly to READY.
+Autonomous recovery: HALTED|DEGRADED -> RECOVERY -> RECONCILING -> READY.
 Submit handoff is race-safe via _submit_mutex (concurrent TOCTOU closed).
 """
 
@@ -29,6 +30,7 @@ class LifecycleState(str, Enum):
     STOPPING = "STOPPING"
     STOPPED = "STOPPED"
     HALTED = "HALTED"
+    RECOVERY = "RECOVERY"
 
 
 TERMINAL_SESSION_STATES = frozenset(
@@ -63,6 +65,7 @@ _TRANSITIONS: dict[LifecycleState, frozenset[LifecycleState]] = {
     ),
     LifecycleState.DEGRADED: frozenset(
         {
+            LifecycleState.RECOVERY,
             LifecycleState.RECONCILING,
             LifecycleState.KILL,
             LifecycleState.HALTED,
@@ -72,7 +75,22 @@ _TRANSITIONS: dict[LifecycleState, frozenset[LifecycleState]] = {
     LifecycleState.KILL: frozenset({LifecycleState.STOPPING, LifecycleState.HALTED}),
     LifecycleState.STOPPING: frozenset({LifecycleState.STOPPED}),
     LifecycleState.STOPPED: frozenset(),
-    LifecycleState.HALTED: frozenset({LifecycleState.STOPPING, LifecycleState.RECONCILING}),
+    # Full autonomous: HALTED is not a human dead-end, but cannot jump to READY.
+    # Recovery path: HALTED -> RECOVERY -> RECONCILING -> (validation) -> READY
+    LifecycleState.HALTED: frozenset(
+        {
+            LifecycleState.RECOVERY,
+            LifecycleState.STOPPING,
+        }
+    ),
+    LifecycleState.RECOVERY: frozenset(
+        {
+            LifecycleState.RECONCILING,
+            LifecycleState.HALTED,
+            LifecycleState.KILL,
+            LifecycleState.STOPPING,
+        }
+    ),
 }
 
 
@@ -115,7 +133,6 @@ class LifecycleGovernor:
         self._last_tick_ts: float | None = None
         self._process_alive = True
         self._kill_sticky = False
-        # Serializes authorization check with create_order handoff (INV-33 concurrent TOCTOU).
         self._submit_mutex = threading.Lock()
 
     @property
@@ -187,9 +204,14 @@ class LifecycleGovernor:
             if target == LifecycleState.READY and self._state == LifecycleState.KILL:
                 logger.warning("event=lifecycle_force_rejected from=KILL to=READY")
                 return
-            if target == LifecycleState.READY and self._state == LifecycleState.DEGRADED:
+            if target == LifecycleState.READY and self._state in (
+                LifecycleState.DEGRADED,
+                LifecycleState.HALTED,
+                LifecycleState.RECOVERY,
+            ):
                 logger.warning(
-                    "event=lifecycle_force_rejected from=DEGRADED to=READY must_reconcile_first"
+                    "event=lifecycle_force_rejected from=%s to=READY must_reconcile_first",
+                    self._state.value,
                 )
                 return
             prev = self._state
@@ -225,6 +247,29 @@ class LifecycleGovernor:
                 f"trading not authorized: state={snap.state.value} reason={snap.reason}"
             )
 
+    def begin_recovery(self, *, reason: str = "autonomous_recovery") -> bool:
+        """HALTED/DEGRADED -> RECOVERY (never READY). Caller must then RECONCILING."""
+        with self._lock:
+            if self._state == LifecycleState.DEGRADED:
+                return self.transition(LifecycleState.RECOVERY, reason=reason)
+            if self._state == LifecycleState.HALTED:
+                if LifecycleState.RECOVERY not in _TRANSITIONS.get(self._state, frozenset()):
+                    return False
+                prev = self._state
+                self._state = LifecycleState.RECOVERY
+                self._reason = reason[:300]
+                logger.info(
+                    "event=runtime_recovery from=%s reason=%s",
+                    prev.value,
+                    reason[:200],
+                )
+                return True
+            return False
+
+    def complete_recovery_to_reconciling(self, *, reason: str = "recovery_recon") -> bool:
+        """RECOVERY -> RECONCILING only. READY requires successful recon after this."""
+        return self.transition(LifecycleState.RECONCILING, reason=reason)
+
     def request_stop(self) -> None:
         """Disable trading immediately. Takes submit mutex so no concurrent create_order can start."""
         with self._submit_mutex:
@@ -240,14 +285,7 @@ class LifecycleGovernor:
                 )
 
     def run_authorized_submit(self, submit_fn: Callable[[], T]) -> T:
-        """Atomically authorize and run submit_fn under the submit mutex (INV-33).
-
-        request_stop() also acquires this mutex, so either:
-        - stop wins first → this raises and create_order is never called, or
-        - submit wins first → stop waits until submit_fn returns.
-        There is no window where authorization is observed True then stop intervenes
-        before submit_fn is invoked.
-        """
+        """Atomically authorize and run submit_fn under the submit mutex (INV-33)."""
         with self._submit_mutex:
             with self._lock:
                 if self._state != LifecycleState.READY or self._kill_sticky:
