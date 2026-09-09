@@ -135,7 +135,6 @@ class TradingBot:
             return False
         circuit_clear = True
 
-        # PnL + daily loss validation BEFORE READY (INV-51)
         day = self.pnl.stats_for_day()
         self.metrics.update_pnl(day.day, day.realized_pnl, day.notional_traded)
         breach = self.risk.check_daily_limits_or_kill()
@@ -388,7 +387,7 @@ class TradingBot:
                 ticker = self.client.fetch_ticker(symbol)
                 last = float(ticker.last or 0)
             except Exception as exc:
-                logger.warning("market data failed %s: %s", symbol, exp)
+                logger.warning("market data failed %s: %s", symbol, exc)
                 continue
             if last <= 0:
                 continue
