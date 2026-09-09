@@ -339,71 +339,104 @@ class ExecutionEngine:
         partial: bool = False,
         remaining: float = 0.0,
     ) -> None:
+        """Apply fill accounting exactly-once using cumulative → delta (S5-B3).
+
+        Exchange reports *cumulative* filled. We only account
+        delta = max(0, cumulative_filled - intent.accounted_filled).
+        Duplicate callbacks with the same cumulative filled are no-ops.
+        """
         avg = result.average or intent.last_price or 0.0
-        filled = float(result.filled or intent.normalized_base or intent.base_amount or 0.0)
-        if side == Side.BUY:
-            filled_notional = float(filled * avg) if avg > 0 else float(intent.quote_amount or 0.0)
-            # Accumulate memory position (match PositionStore.upsert semantics)
-            existing = self.positions.get(intent.symbol)
-            if existing and existing.amount > 0 and filled > 0:
-                total = existing.amount + filled
-                if total > 0:
-                    wavg = (
-                        (existing.entry_price * existing.amount) + (avg * filled)
-                    ) / total
-                else:
-                    wavg = avg
-                self.positions[intent.symbol] = PositionState(
-                    symbol=intent.symbol, base=base, quote=quote,
-                    amount=total, entry_price=wavg, opened_at=existing.opened_at,
-                )
-            else:
-                self.positions[intent.symbol] = PositionState(
-                    symbol=intent.symbol, base=base, quote=quote,
-                    amount=filled, entry_price=avg,
-                )
-            self.positions_store.upsert(
-                symbol=intent.symbol, base=base, quote=quote, amount=filled, entry_price=avg,
-                order_id=result.id, client_order_id=intent.client_order_id or "",
+        cumulative = float(result.filled or intent.normalized_base or intent.base_amount or 0.0)
+        previously = float(getattr(intent, "accounted_filled", 0.0) or 0.0)
+        delta = max(0.0, cumulative - previously)
+        if delta <= 1e-12 and not (not partial and previously > 0 and remaining <= 1e-12):
+            # No new fill to account; still may need to clear residual on terminal full fill
+            if not partial and self.risk is not None and side == Side.BUY:
+                # Terminal: drop any residual reservation without re-recording notional
+                self.risk.release_reservation(intent.client_order_id or "")
+            logger.info(
+                "event=fill_noop_already_accounted cid=%s cum=%.8f accounted=%.8f",
+                intent.client_order_id, cumulative, previously,
             )
+            return
+
+        if side == Side.BUY:
+            delta_notional = float(delta * avg) if avg > 0 else 0.0
+            if delta > 1e-12:
+                existing = self.positions.get(intent.symbol)
+                if existing and existing.amount > 0:
+                    total = existing.amount + delta
+                    wavg = (
+                        (existing.entry_price * existing.amount) + (avg * delta)
+                    ) / total if total > 0 else avg
+                    self.positions[intent.symbol] = PositionState(
+                        symbol=intent.symbol, base=base, quote=quote,
+                        amount=total, entry_price=wavg, opened_at=existing.opened_at,
+                    )
+                else:
+                    self.positions[intent.symbol] = PositionState(
+                        symbol=intent.symbol, base=base, quote=quote,
+                        amount=delta, entry_price=avg,
+                    )
+                self.positions_store.upsert(
+                    symbol=intent.symbol, base=base, quote=quote,
+                    amount=delta, entry_price=avg,
+                    order_id=result.id, client_order_id=intent.client_order_id or "",
+                )
+
+            # Persist accounted progress BEFORE risk commit (crash-safe watermark)
+            intent.accounted_filled = previously + delta
+            intent.filled = cumulative
+            self.intents.update(intent)
+
             if self.risk is not None:
                 if partial:
-                    # Account filled portion; keep residual reservation for open remainder
                     quote_total = float(intent.quote_amount or 0.0)
-                    residual = max(0.0, quote_total - filled_notional)
+                    accounted_notional = float(intent.accounted_filled * avg) if avg > 0 else 0.0
+                    residual = max(0.0, quote_total - accounted_notional)
                     if residual <= 0 and remaining > 0 and avg > 0:
                         residual = remaining * avg
                     self.risk.commit_partial_and_rereserve(
                         intent.client_order_id or "",
                         side="buy",
                         symbol=intent.symbol,
-                        filled_notional=filled_notional,
+                        filled_notional=delta_notional,
                         remaining_reserve=residual,
                         pnl=0.0,
                         order_id=result.id,
                         client_order_id=intent.client_order_id or "",
                     )
                 else:
+                    # Full fill: commit only the *unaccounted* delta notional, drop residual
                     self.risk.commit_reservation(
                         intent.client_order_id or "",
                         side="buy",
                         symbol=intent.symbol,
-                        actual_notional=filled_notional or float(intent.quote_amount or 0.0),
+                        actual_notional=delta_notional,
                         pnl=0.0,
                         order_id=result.id,
                         client_order_id=intent.client_order_id or "",
                     )
+            logger.info(
+                "event=fill_accounted cid=%s delta=%.8f cum=%.8f accounted=%.8f partial=%s",
+                intent.client_order_id, delta, cumulative, intent.accounted_filled, partial,
+            )
         else:
+            if delta <= 1e-12:
+                return
             entry = self.load_entry_price(intent.symbol) or avg
-            notional = filled * avg
-            pnl = (avg - entry) * filled if entry > 0 else 0.0
-            self.positions_store.reduce_or_close(intent.symbol, filled)
+            notional = delta * avg
+            pnl = (avg - entry) * delta if entry > 0 else 0.0
+            self.positions_store.reduce_or_close(intent.symbol, delta)
             if intent.symbol in self.positions:
-                left = self.positions[intent.symbol].amount - filled
+                left = self.positions[intent.symbol].amount - delta
                 if left <= 1e-12:
                     self.positions.pop(intent.symbol, None)
                 else:
                     self.positions[intent.symbol].amount = left
+            intent.accounted_filled = previously + delta
+            intent.filled = cumulative
+            self.intents.update(intent)
             if self.risk is not None:
                 self.risk.record_fill(
                     side="sell",
@@ -423,7 +456,12 @@ class ExecutionEngine:
             synthetic = self._result_from_intent(i, side)
             base = i.symbol.split("/")[0] if "/" in i.symbol else ""
             quote = i.symbol.split("/")[1] if "/" in i.symbol else ""
-            self._on_fill_confirmed(i, side, synthetic, base=base, quote=quote)
+            is_partial = i.status == OrderIntentStatus.PARTIALLY_FILLED
+            rem = float(synthetic.remaining or 0.0)
+            self._on_fill_confirmed(
+                i, side, synthetic, base=base, quote=quote,
+                partial=is_partial, remaining=rem,
+            )
 
         self.reconciler.reconcile_intent(intent, on_confirmed=_on_confirmed)
         refreshed = self.intents.by_client_id(intent.client_order_id)
