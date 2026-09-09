@@ -167,7 +167,7 @@ class PositionStore:
         min_dust: float = 1e-8,
         stable_like: frozenset[str] | None = None,
     ) -> list[str]:
-        stables = stable_like or frozenset({"IDR", "USDT", "USDC", "BUSD", "USD"})
+        _stables = stable_like or frozenset({"IDR", "USDT", "USDC", "BUSD", "USD"})
         notes: list[str] = []
         with self._lock:
             to_delete: list[str] = []
