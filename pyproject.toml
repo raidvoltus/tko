@@ -25,7 +25,6 @@ classifiers = [
 ]
 
 dependencies = [
-    # Prefer requirements.lock for bit-for-bit reproducible installs (CI).
     "ccxt>=4.5.29,<5",
     "python-telegram-bot>=22.5,<23",
     "pydantic>=2.12.5,<3",
@@ -41,6 +40,12 @@ dev = [
 ]
 packaging = [
     "pyinstaller>=6.0",
+]
+ml = [
+    "numpy>=1.26,<3",
+    "pandas>=2.1,<3",
+    "scikit-learn>=1.4,<2",
+    "joblib>=1.3,<2",
 ]
 
 [project.scripts]
