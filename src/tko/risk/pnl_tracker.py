@@ -45,6 +45,7 @@ class DailyPnLTracker:
         self._realized_by_day: dict[str, float] = {}
         self._notional_by_day: dict[str, float] = {}
         self._count_by_day: dict[str, int] = {}
+        self._fill_event_ids: set[str] = set()
         self._load()
 
     def _load(self) -> None:
@@ -68,6 +69,9 @@ class DailyPnLTracker:
                     self._realized_by_day[day] = self._realized_by_day.get(day, 0.0) + pnl
                     self._notional_by_day[day] = self._notional_by_day.get(day, 0.0) + abs(notional)
                     self._count_by_day[day] = self._count_by_day.get(day, 0) + 1
+                    feid = str(row.get("fill_event_id") or "")
+                    if feid:
+                        self._fill_event_ids.add(feid)
         except OSError as exc:
             logger.warning("Failed to load PnL ledger %s: %s", self.path, exc)
 
@@ -101,9 +105,11 @@ class DailyPnLTracker:
         client_order_id: str = "",
         ts: float | None = None,
         extra: dict[str, Any] | None = None,
+        fill_event_id: str = "",
     ) -> DayStats:
         now = ts if ts is not None else time.time()
         day = _day_key(now, self.timezone_name)
+        feid = (fill_event_id or "").strip()
         row: dict[str, Any] = {
             "ts": now,
             "day": day,
@@ -114,9 +120,14 @@ class DailyPnLTracker:
             "order_id": order_id or "",
             "client_order_id": client_order_id or "",
         }
+        if feid:
+            row["fill_event_id"] = feid
         if extra:
             row["extra"] = extra
         with self._lock:
+            # S5-B5: skip duplicate fill_event_id (crash replay)
+            if feid and feid in self._fill_event_ids:
+                return self.stats_for_day(day)
             try:
                 with self.path.open("a", encoding="utf-8") as fh:
                     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -130,6 +141,8 @@ class DailyPnLTracker:
             self._realized_by_day[day] = self._realized_by_day.get(day, 0.0) + float(pnl)
             self._notional_by_day[day] = self._notional_by_day.get(day, 0.0) + abs(float(notional))
             self._count_by_day[day] = self._count_by_day.get(day, 0) + 1
+            if feid:
+                self._fill_event_ids.add(feid)
             stats = DayStats(
                 day=day,
                 realized_pnl=self._realized_by_day[day],
