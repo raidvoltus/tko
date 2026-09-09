@@ -177,13 +177,18 @@ class RiskEngine:
                 used = float(self.pnl.today_notional())
                 outstanding = float(sum(self._reserved.values()))
                 limit = float(self.s.max_daily_notional or 0.0)
-                if limit > 0 and used + outstanding + rem > limit + 1e-9:
-                    # Still record residual as reserved best-effort; log breach risk
-                    logger.critical(
-                        "event=partial_rereserve_over_limit id=%s rem=%.4f used=%.4f limit=%.4f",
-                        rid, rem, used, limit,
-                    )
-                self._reserved[rid] = rem
+                # S5-B4: fail-closed — never let residual push used+reserved over limit
+                if limit > 0:
+                    headroom = max(0.0, limit - used - outstanding)
+                    if rem > headroom + 1e-9:
+                        logger.critical(
+                            "event=partial_rereserve_clamped id=%s requested=%.4f "
+                            "headroom=%.4f used=%.4f limit=%.4f",
+                            rid, rem, headroom, used, limit,
+                        )
+                        rem = headroom
+                if rem > 0:
+                    self._reserved[rid] = rem
         logger.info(
             "event=notional_partial_commit id=%s filled=%.4f residual_reserve=%.4f",
             rid, filled_notional, remaining_reserve,
