@@ -125,6 +125,7 @@ class RiskEngine:
         pnl: float = 0.0,
         order_id: str = "",
         client_order_id: str = "",
+        fill_event_id: str = "",
     ) -> None:
         """Release reservation and durable-record the fill under the same lock window."""
         rid = (reservation_id or "").strip()
@@ -138,6 +139,7 @@ class RiskEngine:
                 pnl=float(pnl),
                 order_id=order_id,
                 client_order_id=client_order_id or rid,
+                fill_event_id=fill_event_id,
             )
         logger.info(
             "event=notional_committed id=%s actual=%.4f",
@@ -157,6 +159,7 @@ class RiskEngine:
         pnl: float = 0.0,
         order_id: str = "",
         client_order_id: str = "",
+        fill_event_id: str = "",
     ) -> tuple[bool, str]:
         """Account filled portion and keep a residual reservation for open remainder (S5-W2)."""
         rid = (reservation_id or "").strip()
@@ -171,6 +174,7 @@ class RiskEngine:
                     pnl=float(pnl),
                     order_id=order_id,
                     client_order_id=client_order_id or rid,
+                    fill_event_id=fill_event_id,
                 )
             rem = float(remaining_reserve or 0.0)
             if rid and rem > 0:
@@ -433,6 +437,7 @@ class RiskEngine:
         pnl: float = 0.0,
         order_id: str = "",
         client_order_id: str = "",
+        fill_event_id: str = "",
     ) -> None:
         """Legacy fill recorder. Prefer commit_reservation when a reservation exists."""
         rid = (client_order_id or "").strip()
@@ -446,5 +451,6 @@ class RiskEngine:
                 pnl=pnl,
                 order_id=order_id,
                 client_order_id=client_order_id,
+                fill_event_id=fill_event_id,
             )
         self.check_daily_limits_or_kill()
