@@ -22,7 +22,16 @@ def _ready_lifecycle():
     """READY LifecycleGovernor for LIVE submit tests (fail-closed engine requires it)."""
     from tko.runtime.lifecycle import LifecycleGovernor, LifecycleState
     g = LifecycleGovernor()
-    g.force(LifecycleState.READY, reason="test")
+    g.transition(LifecycleState.RECONCILING, reason="test")
+    assert g.authorize_ready(
+        reason="test",
+        recon_ok=True,
+        kill_switch_clear=True,
+        circuit_clear=True,
+        daily_risk_ok=True,
+        positions_ok=True,
+        exchange_ok=True,
+    )
     return g
 
 
