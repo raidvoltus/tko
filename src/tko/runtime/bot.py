@@ -56,6 +56,8 @@ class TradingBot:
         self._running = False
         self._last_reconcile = 0.0
         self._stop_requested = False
+        self._recovery_attempts = 0
+        self._max_recovery_attempts = 3
 
     def _hb(self, status: str | None = None) -> None:
         snap = self.lifecycle.snapshot()
@@ -139,12 +141,24 @@ class TradingBot:
     def start(self) -> None:
         self._running = True
         self._stop_requested = False
+        self._recovery_attempts = 0
+        self._max_recovery_attempts = 3
         if not self._startup_barrier():
-            logger.error("Startup barrier failed - not entering trading loop")
+            logger.error("Startup barrier failed - autonomous recovery may retry")
             while self._running and not self._stop_requested:
                 self._hb()
+                if self.lifecycle.state == LifecycleState.HALTED and self._recovery_attempts < self._max_recovery_attempts:
+                    self._recovery_attempts += 1
+                    if self.lifecycle.begin_recovery(reason=f"startup_recovery_{self._recovery_attempts}"):
+                        self.lifecycle.complete_recovery_to_reconciling(reason="startup_recovery_recon")
+                        if self._startup_barrier():
+                            self._recovery_attempts = 0
+                            break
+                elif self.lifecycle.state in (LifecycleState.STOPPING, LifecycleState.STOPPED, LifecycleState.KILL):
+                    return
                 time.sleep(self.s.loop_interval_sec)
-            return
+            else:
+                return
         try:
             while self._running and not self._stop_requested:
                 if not self.lifecycle.trading_authorized:
@@ -152,8 +166,29 @@ class TradingBot:
                     if self.lifecycle.state == LifecycleState.KILL:
                         time.sleep(self.s.loop_interval_sec)
                         continue
-                    if self.lifecycle.state in (LifecycleState.HALTED, LifecycleState.STOPPING, LifecycleState.STOPPED):
+                    if self.lifecycle.state in (LifecycleState.STOPPING, LifecycleState.STOPPED):
                         break
+                    if self.lifecycle.state == LifecycleState.HALTED:
+                        if self._recovery_attempts < self._max_recovery_attempts:
+                            self._recovery_attempts += 1
+                            logger.warning(
+                                "event=autonomous_recovery attempt=%s/%s",
+                                self._recovery_attempts,
+                                self._max_recovery_attempts,
+                            )
+                            if self.lifecycle.begin_recovery(reason=f"auto_recovery_{self._recovery_attempts}"):
+                                self.lifecycle.complete_recovery_to_reconciling(
+                                    reason="auto_recovery_recon"
+                                )
+                                if self._startup_barrier():
+                                    self._recovery_attempts = 0
+                                    continue
+                        time.sleep(self.s.loop_interval_sec)
+                        continue
+                    if self.lifecycle.state == LifecycleState.RECOVERY:
+                        self.lifecycle.complete_recovery_to_reconciling(reason="recovery_progress")
+                        time.sleep(self.s.loop_interval_sec)
+                        continue
                     time.sleep(self.s.loop_interval_sec)
                     continue
                 self._hb("READY")
