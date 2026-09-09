@@ -146,6 +146,91 @@ class RiskEngine:
         )
         self.check_daily_limits_or_kill()
 
+    def commit_partial_and_rereserve(
+        self,
+        reservation_id: str,
+        *,
+        side: str,
+        symbol: str,
+        filled_notional: float,
+        remaining_reserve: float,
+        pnl: float = 0.0,
+        order_id: str = "",
+        client_order_id: str = "",
+    ) -> tuple[bool, str]:
+        """Account filled portion and keep a residual reservation for open remainder (S5-W2)."""
+        rid = (reservation_id or "").strip()
+        with self._budget_lock:
+            if rid:
+                self._reserved.pop(rid, None)
+            if filled_notional and abs(float(filled_notional)) > 0:
+                self.pnl.record_trade(
+                    side=side,
+                    symbol=symbol,
+                    notional=abs(float(filled_notional)),
+                    pnl=float(pnl),
+                    order_id=order_id,
+                    client_order_id=client_order_id or rid,
+                )
+            rem = float(remaining_reserve or 0.0)
+            if rid and rem > 0:
+                used = float(self.pnl.today_notional())
+                outstanding = float(sum(self._reserved.values()))
+                limit = float(self.s.max_daily_notional or 0.0)
+                if limit > 0 and used + outstanding + rem > limit + 1e-9:
+                    # Still record residual as reserved best-effort; log breach risk
+                    logger.critical(
+                        "event=partial_rereserve_over_limit id=%s rem=%.4f used=%.4f limit=%.4f",
+                        rid, rem, used, limit,
+                    )
+                self._reserved[rid] = rem
+        logger.info(
+            "event=notional_partial_commit id=%s filled=%.4f residual_reserve=%.4f",
+            rid, filled_notional, remaining_reserve,
+        )
+        self.check_daily_limits_or_kill()
+        return True, "partial_committed"
+
+    def rehydrate_reservations_from_intents(self, intents: list) -> int:
+        """Rebuild in-memory reservations from durable BUY intents after restart (S5-Recovery).
+
+        Intent.quote_amount is the SSOT for outstanding reserved budget while status is
+        still blocking (SUBMITTING/UNKNOWN/RECON/PARTIAL/GOVERNOR/…).
+        Already-committed fills live in the PnL ledger and must not be double-counted.
+        """
+        restored = 0
+        with self._budget_lock:
+            self._reserved.clear()
+            for intent in intents:
+                side = str(getattr(intent, "side", "") or "").lower()
+                if side != "buy":
+                    continue
+                cid = str(getattr(intent, "client_order_id", "") or "").strip()
+                if not cid:
+                    continue
+                # Prefer residual: quote_amount - filled*avg when partial
+                quote_amt = float(getattr(intent, "quote_amount", 0) or 0)
+                filled = float(getattr(intent, "filled", 0) or 0)
+                avg = getattr(intent, "average", None)
+                avg_f = float(avg) if avg is not None else 0.0
+                filled_notional = filled * avg_f if filled > 0 and avg_f > 0 else 0.0
+                residual = max(0.0, quote_amt - filled_notional)
+                if residual <= 0:
+                    continue
+                status = getattr(intent, "status", None)
+                status_val = getattr(status, "value", str(status or ""))
+                terminal = {"CONFIRMED", "REJECTED", "FAILED"}
+                if status_val in terminal:
+                    continue
+                self._reserved[cid] = residual
+                restored += 1
+                logger.info(
+                    "event=reservation_rehydrated id=%s residual=%.4f status=%s",
+                    cid, residual, status_val,
+                )
+        logger.info("event=reservation_rehydrate_done count=%d total=%.4f", restored, self.reserved_notional())
+        return restored
+
     # ----------------------------------------------------------- kill / equity
     def _risk_block(self, reason: str) -> None:
         if self.audit is not None:
