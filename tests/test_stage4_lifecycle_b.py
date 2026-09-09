@@ -11,6 +11,23 @@ from tko.core.config import Settings
 from tko.runtime.lifecycle import LifecycleGovernor, LifecycleState
 
 
+def _to_ready(g, *, reason: str = "test_ready") -> None:
+    if g.state == LifecycleState.STARTING:
+        g.transition(LifecycleState.RECONCILING, reason="test_recon")
+    elif g.state != LifecycleState.RECONCILING:
+        g.force(LifecycleState.STARTING, reason="test_reset")
+        g.transition(LifecycleState.RECONCILING, reason="test_recon")
+    assert g.authorize_ready(
+        reason=reason,
+        recon_ok=True,
+        kill_switch_clear=True,
+        circuit_clear=True,
+        daily_risk_ok=True,
+        positions_ok=True,
+        exchange_ok=True,
+    )
+
+
 def _gates(**over):
     base = dict(
         recon_ok=True, kill_switch_clear=True, circuit_clear=True,
@@ -73,7 +90,7 @@ def test_windows_restart_policy_notes():
 
 def test_inv34_kill_cannot_transition_to_ready():
     g = LifecycleGovernor()
-    g.force(LifecycleState.READY, reason="x")
+    _to_ready(g, reason="x")
     assert g.transition(LifecycleState.KILL, reason="k")
     assert g.transition(LifecycleState.READY, reason="nope") is False
     assert g.trading_authorized is False
@@ -84,7 +101,7 @@ def test_inv34_kill_cannot_transition_to_ready():
 
 def test_inv35_degraded_cannot_direct_ready():
     g = LifecycleGovernor()
-    g.force(LifecycleState.READY, reason="x")
+    _to_ready(g, reason="x")
     g.transition(LifecycleState.DEGRADED, reason="d")
     assert g.transition(LifecycleState.READY, reason="nope") is False
     assert g.state == LifecycleState.DEGRADED
@@ -93,7 +110,7 @@ def test_inv35_degraded_cannot_direct_ready():
 
 def test_inv36_degraded_recovery_requires_reconciling():
     g = LifecycleGovernor()
-    g.force(LifecycleState.READY, reason="x")
+    _to_ready(g, reason="x")
     g.transition(LifecycleState.DEGRADED, reason="d")
     assert g.transition(LifecycleState.RECONCILING, reason="recover")
     assert g.transition(LifecycleState.READY, reason="ok") is False
@@ -131,7 +148,7 @@ def test_inv33_47_toctou_submit_blocked(tmp_path: Path):
 
 def test_inv42_stopping_disables_trading_immediately():
     g = LifecycleGovernor()
-    g.force(LifecycleState.READY, reason="x")
+    _to_ready(g, reason="x")
     g.request_stop()
     assert g.state == LifecycleState.STOPPING
     assert g.trading_authorized is False
@@ -153,7 +170,7 @@ def test_inv44_xml_contains_ignore_new():
 
 def test_inv38_signal_requests_stop(tmp_path: Path):
     g = LifecycleGovernor()
-    g.force(LifecycleState.READY, reason="x")
+    _to_ready(g, reason="x")
     g.request_stop()
     assert g.state == LifecycleState.STOPPING
 
