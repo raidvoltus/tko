@@ -1,7 +1,8 @@
-"""Stage 4 micro-closure: fail-closed LIVE POST gate + global call-site audit."""
+"""Stage 4 micro-closure: fail-closed LIVE POST gate + expanded submission surface audit."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -46,23 +47,53 @@ def test_live_create_order_requires_run_authorized_submit_api(tmp_path: Path):
     assert client.create_order.call_count == 0
 
 
-def test_global_live_post_paths_must_use_authorization_gate():
-    """Production src must not call client.create_order outside the gate."""
+_SUSPECT_PATTERNS = [
+    re.compile(r"\.create_order\s*\("),
+    re.compile(r"\.createOrder\s*\("),
+    re.compile(r'getattr\s*\([^,]+,\s*[\'"]create_order[\'"]'),
+    re.compile(r'getattr\s*\([^,]+,\s*[\'"]createOrder[\'"]'),
+    re.compile(r"requests\.post\s*\("),
+    re.compile(r"httpx\.post\s*\("),
+    re.compile(r"session\.post\s*\("),
+    re.compile(r"\.request\s*\(\s*[\'"]POST[\'"]", re.I),
+    re.compile(r'["\']/api/v\d+/order'),
+    re.compile(r'["\']/api/v\d+/orders'),
+    re.compile(r"private_post_order"),
+    re.compile(r"create_market_buy_order"),
+    re.compile(r"create_market_sell_order"),
+]
+
+
+def test_global_live_submission_surface_audit():
+    """Expanded audit: no second LIVE order path outside engine gate + tokocrypto adapter."""
     root = Path(__file__).resolve().parents[1] / "src" / "tko"
     offenders: list[str] = []
+    allow_files = {"tokocrypto.py", "engine.py"}
 
     for path in root.rglob("*.py"):
-        if path.name in ("tokocrypto.py", "engine.py"):
-            continue
-        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if ".create_order(" in line and not line.strip().startswith("#"):
-                offenders.append(f"{path.relative_to(root.parent.parent)}:{i}: {line.strip()}")
+        text = path.read_text(encoding="utf-8")
+        rel = str(path.relative_to(root.parent.parent))
+        for i, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            for pat in _SUSPECT_PATTERNS:
+                if pat.search(line):
+                    if path.name in allow_files:
+                        continue
+                    offenders.append(f"{rel}:{i}: {stripped[:120]}")
 
     eng = (root / "execution" / "engine.py").read_text(encoding="utf-8")
     assert "run_authorized_submit" in eng
     assert "lifecycle required for LIVE create_order" in eng
     stripped = eng.replace("return run(lambda: self.client.create_order(**kwargs))", "")
     assert "return self.client.create_order(**kwargs)" not in stripped
-    assert "if lc is None:\n            return self.client.create_order" not in eng
+    assert eng.count("self.client.create_order") == 1
+    assert not offenders, "Unauthorized LIVE submission surface:\n" + "\n".join(offenders)
 
-    assert not offenders, "Unauthorized LIVE create_order call sites:\n" + "\n".join(offenders)
+
+def test_engine_create_order_count_is_exactly_one_gated_call():
+    eng_path = Path(__file__).resolve().parents[1] / "src" / "tko" / "execution" / "engine.py"
+    text = eng_path.read_text(encoding="utf-8")
+    assert text.count("self.client.create_order") == 1
+    assert "run_authorized_submit" in text
