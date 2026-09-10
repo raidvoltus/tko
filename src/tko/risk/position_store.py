@@ -165,18 +165,32 @@ class PositionStore:
             self._save()
             return pos
 
-    def reduce_or_close(self, symbol: str, amount_sold: float) -> StoredPosition | None:
+    def reduce_or_close(
+        self,
+        symbol: str,
+        amount_sold: float,
+        *,
+        fill_event_id: str = "",
+    ) -> StoredPosition | None:
         with self._lock:
+            # S5 crash-window: skip if this fill event already reduced the store
+            fid = (fill_event_id or "").strip()
+            if fid and fid in self._applied_fill_ids:
+                return self._positions.get(symbol)
             existing = self._positions.get(symbol)
             if not existing:
                 return None
             remaining = existing.amount - amount_sold
             if remaining <= 1e-12:
                 self._positions.pop(symbol, None)
+                if fid:
+                    self._applied_fill_ids.add(fid)
                 self._save()
                 return None
             existing.amount = remaining
             existing.updated_at = time.time()
+            if fid:
+                self._applied_fill_ids.add(fid)
             self._save()
             return existing
 
