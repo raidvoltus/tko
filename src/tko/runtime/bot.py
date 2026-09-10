@@ -322,7 +322,7 @@ class TradingBot:
                     self.lifecycle.mark_tick()
                     self.metrics.set_status("OK")
                 except Exception as exc:
-                    logger.exception("tick failed: %s", exp)
+                    logger.exception("tick failed: %s", exc)
                     self.audit.record("ERROR", reason=f"tick:{exc}")
                     self.metrics.set_status("ERROR", str(exc)[:200])
                     self.lifecycle.transition(LifecycleState.DEGRADED, reason=f"tick:{exc}")
@@ -356,7 +356,7 @@ class TradingBot:
         try:
             self.client.close()
         except Exception as exc:
-            logger.warning("client close: %s", exp)
+            logger.warning("client close: %s", exc)
         self.lifecycle.force(LifecycleState.STOPPED, reason="shutdown_complete")
         self._hb("STOPPED")
         self.metrics.set_status("STOPPED")
