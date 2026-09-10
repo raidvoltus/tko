@@ -96,3 +96,58 @@ Invariants:
 3. ML never calls `create_order` and never overrides RiskEngine.
 4. Features use only past+current bars (no look-ahead).
 5. Baseline backtest must be beaten before promoting a model to production filter.
+
+## Stage 5.1 — Diversity, Pool, Ensemble & Computational Governor
+
+Additive layer on top of Stage 5. Rule-based `BtcAnalyzer` remains primary.
+RiskEngine and LifecycleGovernor still gate every order. ML only filters BUY.
+
+### Components
+
+| Component | Path | Role |
+|-----------|------|------|
+| ComputationalGovernor | `tko.ml.governor` | FULL → DEGRADE_1 → DEGRADE_2 → SAFE_EXIT |
+| Backends | `tko.ml.backends.*` | lightgbm, logreg, extratrees, histgbm, gaussiannb |
+| Diversity | `tko.ml.diversity` | Correlation + family-aware selection |
+| ModelPool | `tko.ml.pool` | Holds ≤ max_models backends, respects governor |
+| Ensemble | `tko.ml.ensemble` | NNLS (scipy) or soft-voting fallback |
+| Filter hooks | `tko.ml.filter` | Optional `governor` / `pool` / `ensemble` params |
+
+### Invariants
+
+1. **Additive only.** No changes to bot.py, strategy, risk, execution, exchange, lifecycle trading semantics.
+2. **Default OFF.** `ml_governor_enabled=False`, `ml_filter_enabled=False`.
+3. **Fail-closed.** Missing library / probe error / fit failure → skip model, never crash.
+4. **Governor may kill models.** SAFE_EXIT suppresses BUY only; SELL stays free.
+5. **4GB safe.** `n_jobs=1`, max_depth≤4, n_estimators≤50, max_training_rows≤3000.
+6. **ML never authorizes BUY.** Pool/ensemble/governor only feed `MlSignalFilter`; `evaluate_entry` remains the sole authorization gate.
+
+### Config keys (prefix `TKO_ML_*`)
+
+```text
+ml_governor_enabled: bool = False
+ml_profile: str = "ULTRA_LITE"
+ml_pool_max_models: int = 5
+ml_n_jobs: int = 1
+ml_max_trees: int = 40
+ml_max_depth: int = 4
+ml_max_training_rows: int = 3000
+ml_safe_exit_on_pressure: bool = True
+ml_diversity_threshold: float = 0.80
+```
+
+Existing Stage 5 keys are unchanged.
+
+### Data flow (BUY path only)
+
+```
+BtcAnalyzer → TradeDecision (signal)
+     ↓
+MlSignalFilter (optional governor SAFE_EXIT → suppress BUY)
+     ↓
+RiskEngine.evaluate_entry(..., signal=...)
+     ↓
+RiskDecision.approved → ExecutionEngine.buy → lifecycle authorized submit
+```
+
+SELL and emergency exits never consult the pool/ensemble/governor.
