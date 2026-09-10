@@ -322,7 +322,7 @@ class TradingBot:
                     self.lifecycle.mark_tick()
                     self.metrics.set_status("OK")
                 except Exception as exc:
-                    logger.exception("tick failed: %s", exc)
+                    logger.exception("tick failed: %s", exp)
                     self.audit.record("ERROR", reason=f"tick:{exc}")
                     self.metrics.set_status("ERROR", str(exc)[:200])
                     self.lifecycle.transition(LifecycleState.DEGRADED, reason=f"tick:{exc}")
@@ -356,7 +356,7 @@ class TradingBot:
         try:
             self.client.close()
         except Exception as exc:
-            logger.warning("client close: %s", exc)
+            logger.warning("client close: %s", exp)
         self.lifecycle.force(LifecycleState.STOPPED, reason="shutdown_complete")
         self._hb("STOPPED")
         self.metrics.set_status("STOPPED")
@@ -371,6 +371,7 @@ class TradingBot:
         balances = self.client.fetch_balance()
         self.lifecycle.mark_exchange_contact()
         free_map = {a: b.free for a, b in balances.items() if b.free > 0}
+        logger.info("balances free=%s", {k: round(v, 8) for k, v in sorted(free_map.items())})
         if self._manage_positions(free_map):
             return
         self._try_buy_primary(free_map)
@@ -388,17 +389,19 @@ class TradingBot:
             if base in STABLE_LIKE and base != self.s.base_asset.upper():
                 continue
             symbol = None
+            quote_used = None
             for q in quotes:
                 symbol = self.client.resolve_symbol(base, q)
                 if symbol:
+                    quote_used = q
                     break
-            if not symbol:
+            if not symbol or not quote_used:
                 continue
             try:
                 ticker = self.client.fetch_ticker(symbol)
                 last = float(ticker.last or 0)
             except Exception as exc:
-                logger.warning("ticker failed %s: %s", symbol, exp)
+                logger.warning("ticker failed %s: %s", symbol, exc)
                 continue
             if last <= 0:
                 continue
@@ -406,37 +409,66 @@ class TradingBot:
             decision = self.risk.evaluate_exit(
                 symbol=symbol, base_free=free_base, last_price=last, entry_price=entry
             )
-            if not self.lifecycle.trading_authorized:
-                return True
-            if decision.approved and decision.size and decision.size > 0:
-                self.execution.submit_sell(symbol, decision.size, last, reason=decision.reason)
-                acted = True
+            if decision.approved and decision.size_base > 0:
+                if not self.lifecycle.trading_authorized:
+                    return acted
+                result = self.execution.sell(symbol, decision, last, base=base, quote=quote_used)
+                if result:
+                    acted = True
+                    self.notify.send(f"SELL {symbol} filled={result.filled} avg={result.average}")
         return acted
 
     def _try_buy_primary(self, free_map: dict[str, float]) -> None:
         if not self.lifecycle.trading_authorized:
             return
         base = self.s.base_asset.upper()
-        for q in self.s.quote_asset_list():
-            symbol = self.client.resolve_symbol(base, q)
+        quotes = self.s.quote_asset_list()
+        for quote in quotes:
+            free_q = free_map.get(quote, 0.0)
+            if free_q < self.s.min_quote_balance:
+                continue
+            symbol = self.client.resolve_symbol(base, quote)
             if not symbol:
                 continue
-            quote_free = float(free_map.get(q, 0.0))
             try:
+                ohlcv = self.client.fetch_ohlcv(
+                    symbol,
+                    timeframe=self.s.ohlcv_timeframe,
+                    limit=self.s.ohlcv_limit,
+                )
                 ticker = self.client.fetch_ticker(symbol)
                 last = float(ticker.last or 0)
-            except Exception:
+            except Exception as exp:
+                logger.warning("market data failed %s: %s", symbol, exp)
                 continue
             if last <= 0:
                 continue
+            if self.ohlcv_store is not None:
+                try:
+                    self.ohlcv_store.append(symbol, self.s.ohlcv_timeframe, ohlcv)
+                except Exception:
+                    pass
+            signal = self.strategy.analyze(ohlcv)
+            if self.ml_filter is not None and self.ml_filter.enabled:
+                try:
+                    signal = self.ml_filter.filter(signal, ohlcv)
+                except Exception as exp:
+                    logger.warning("ml filter failed: %s", exp)
+            open_n = len([p for p in self.positions_store.all() if p.amount > 0])
             decision = self.risk.evaluate_entry(
                 symbol=symbol,
-                quote_free=quote_free,
+                quote_free=free_q,
                 last_price=last,
-                signal=None,
+                signal=signal,
+                open_positions=open_n,
+                quote_asset=quote,
             )
+            if not decision.approved:
+                logger.info("entry blocked %s: %s", symbol, decision.reason)
+                continue
             if not self.lifecycle.trading_authorized:
                 return
-            if decision.approved and decision.size and decision.size > 0:
-                self.execution.submit_buy(symbol, decision.size, last, reason=decision.reason)
-                return
+            result = self.execution.buy(symbol, base, quote, decision, last)
+            if result:
+                self.notify.send(f"BUY {symbol} filled={result.filled} avg={result.average}")
+            return
