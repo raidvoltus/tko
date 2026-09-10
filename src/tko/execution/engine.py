@@ -60,7 +60,6 @@ class ExecutionEngine:
             max_unknown_checks=5,
         )
         self._hydrate_positions_memory()
-        # S5-Recovery: rebuild in-memory reservations from durable BUY intents
         if self.risk is not None:
             try:
                 holding = self.intents.buy_intents_holding_budget()
@@ -69,7 +68,6 @@ class ExecutionEngine:
                     logger.info("event=startup_reservation_rehydrate count=%d", n)
             except Exception as exc:
                 logger.warning("reservation rehydrate failed: %s", exc)
-        # S5-B5: replay any journaled fills not yet applied (crash recovery)
         try:
             self._replay_unapplied_fills()
         except Exception as exc:
@@ -92,7 +90,6 @@ class ExecutionEngine:
         return None
 
     def reconcile_pending(self) -> None:
-        """Reconcile UNKNOWN/RECON/PARTIAL and crash-orphaned SUBMITTING intents."""
         pending = list(self.intents.unresolved_for_recovery())
         for intent in pending:
             if intent.status == OrderIntentStatus.SUBMITTING:
@@ -334,17 +331,6 @@ class ExecutionEngine:
         partial: bool = False,
         remaining: float = 0.0,
     ) -> None:
-        """Exactly-once fill accounting via durable fill journal barrier (S5-B5).
-
-        Order of operations:
-          1. compute delta from cumulative vs accounted_filled
-          2. try_record into fill journal (fsync) — first durable barrier
-          3. apply position / watermark / PnL / reservation
-          4. mark_applied in journal
-
-        Crash after (2) and before (4): startup replays unapplied events.
-        Crash before (2): no durable trace → safe to recompute delta from exchange.
-        """
         avg = result.average or intent.last_price or 0.0
         cumulative = float(result.filled or intent.normalized_base or intent.base_amount or 0.0)
         previously = float(getattr(intent, "accounted_filled", 0.0) or 0.0)
@@ -397,7 +383,6 @@ class ExecutionEngine:
         base: str = "",
         quote: str = "",
     ) -> None:
-        """Idempotent side-effect application for a journaled fill event."""
         if self.fill_journal.is_applied(event.event_id):
             return
 
@@ -478,8 +463,6 @@ class ExecutionEngine:
             entry = self.load_entry_price(event.symbol) or avg
             notional = delta * avg
             pnl = (avg - entry) * delta if entry > 0 else 0.0
-            # Durable reduce first; sync memory from store (do NOT subtract twice —
-            # positions dict may hold the same StoredPosition object reference).
             stored = self.positions_store.reduce_or_close(
                 event.symbol, delta, fill_event_id=event.event_id
             )
@@ -515,7 +498,6 @@ class ExecutionEngine:
         )
 
     def _replay_unapplied_fills(self) -> None:
-        """Crash recovery: apply any journaled fill events not yet marked applied."""
         pending = self.fill_journal.unapplied_events()
         if not pending:
             return
@@ -550,6 +532,12 @@ class ExecutionEngine:
             intent.attempts = refreshed.attempts
             intent.error_category = refreshed.error_category
             intent.error_message = refreshed.error_message
+            # S6-A: exchange terminal reject with zero fill → release reservation
+            if (
+                refreshed.status == OrderIntentStatus.REJECTED
+                and self.risk is not None
+            ):
+                self.risk.release_reservation(intent.client_order_id or "")
 
     def _result_from_intent(self, intent: OrderIntent, side: Side) -> OrderResult:
         amount = float(intent.normalized_base or intent.base_amount or 0.0)
