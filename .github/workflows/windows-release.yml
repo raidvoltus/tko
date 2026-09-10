@@ -1,0 +1,135 @@
+name: Windows Release EXE
+
+# Build TKO-Core.exe + TKO-GUI.exe on windows-latest and publish downloadable artifacts.
+# Credentials are NEVER bundled.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "packaging/**"
+      - "scripts/build_stage10.ps1"
+      - ".github/workflows/windows-release.yml"
+      - "pyproject.toml"
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock
+          pip install -e ".[packaging]"
+          python --version
+          pyinstaller --version
+          git rev-parse HEAD
+
+      - name: Build dual EXE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $commit = (git rev-parse HEAD).Trim()
+          $branch = (git rev-parse --abbrev-ref HEAD).Trim()
+          $pyver  = (python --version 2>&1)
+          $pyi    = (pyinstaller --version 2>&1)
+
+          Remove-Item -Recurse -Force dist, build -ErrorAction SilentlyContinue
+
+          pyinstaller --clean --noconfirm --distpath dist packaging\TKO-Core.spec
+          if ($LASTEXITCODE -ne 0) { throw "TKO-Core build failed" }
+          pyinstaller --clean --noconfirm --distpath dist packaging\TKO-GUI.spec
+          if ($LASTEXITCODE -ne 0) { throw "TKO-GUI build failed" }
+
+          $core = Get-ChildItem -Recurse dist -Filter TKO-Core.exe | Select-Object -First 1
+          $gui  = Get-ChildItem -Recurse dist -Filter TKO-GUI.exe  | Select-Object -First 1
+          if (-not $core -or -not $gui) { throw "Missing EXE after build" }
+
+          $coreHash = (Get-FileHash $core.FullName -Algorithm SHA256).Hash
+          $guiHash  = (Get-FileHash $gui.FullName  -Algorithm SHA256).Hash
+          $ts = Get-Date -Format o
+
+          @"
+          TKO Stage 10 Windows Release
+          ============================
+          BUILD COMMIT: $commit
+          BRANCH:       $branch
+          PYTHON:       $pyver
+          PYINSTALLER:  $pyi
+          OS:           $([Environment]::OSVersion.VersionString)
+          ARCH:         $env:PROCESSOR_ARCHITECTURE
+          RUNNER:       GitHub Actions windows-latest
+          CORE PATH:    $($core.FullName)
+          GUI PATH:     $($gui.FullName)
+          CORE SHA256:  $coreHash
+          GUI  SHA256:  $guiHash
+          BUILT AT:     $ts
+
+          NOTES
+          - Credentials are NOT bundled. Provision on the target PC via keyring / tko setup.
+          - Do NOT set TKO_IPC_TCP=1 on production Windows (use Named Pipe).
+          - Closing GUI does not stop Core.
+          - Smoke: start Core alone, start GUI, close GUI, confirm Core still running.
+          - Do not place live orders solely to prove the GUI.
+          "@ | Out-File dist\RELEASE.txt -Encoding utf8
+
+          Write-Host "CORE SHA256=$coreHash"
+          Write-Host "GUI  SHA256=$guiHash"
+          Get-ChildItem -Recurse dist | Select-Object FullName, Length
+
+      - name: Pack release zips
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $commit = (git rev-parse --short HEAD).Trim()
+          if (Test-Path dist\TKO-Core) {
+            Compress-Archive -Path dist\TKO-Core\* -DestinationPath "dist\TKO-Core-windows-x64-$commit.zip" -Force
+          } else {
+            throw "dist\TKO-Core missing"
+          }
+          if (Test-Path dist\TKO-GUI) {
+            Compress-Archive -Path dist\TKO-GUI\* -DestinationPath "dist\TKO-GUI-windows-x64-$commit.zip" -Force
+          } else {
+            throw "dist\TKO-GUI missing"
+          }
+          Copy-Item dist\RELEASE.txt "dist\RELEASE-$commit.txt" -Force
+          Get-ChildItem dist\*.zip, dist\RELEASE*.txt | Format-Table Name, Length
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tko-windows-exe-${{ github.sha }}
+          path: |
+            dist/TKO-Core-windows-x64-*.zip
+            dist/TKO-GUI-windows-x64-*.zip
+            dist/RELEASE*.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to GitHub Release (if tag/release event)
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          gh release upload $tag dist\TKO-Core-windows-x64-*.zip dist\TKO-GUI-windows-x64-*.zip dist\RELEASE*.txt --clobber
