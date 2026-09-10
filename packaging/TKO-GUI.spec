@@ -3,7 +3,8 @@
 from pathlib import Path
 
 block_cipher = None
-SPECDIR = Path(SPECPATH).resolve().parent
+_sp = Path(SPECPATH).resolve()
+SPECDIR = _sp.parent if _sp.is_file() else _sp
 ROOT = SPECDIR.parent
 
 hiddenimports = [
