@@ -25,6 +25,7 @@ class Heartbeat:
         lifecycle: str | None = None,
         trading_authorized: bool | None = None,
         last_error: str = "",
+        process_alive: bool = True,
         extra: dict[str, Any] | None = None,
     ) -> None:
         payload: dict[str, Any] = {
@@ -35,7 +36,7 @@ class Heartbeat:
             if trading_authorized is not None
             else (status in ("OK", "READY")),
             "last_error": (last_error or "")[:500],
-            "process_alive": True,
+            "process_alive": bool(process_alive),
         }
         if extra:
             for k, v in extra.items():
