@@ -239,6 +239,13 @@ class LifecycleGovernor:
         with self._lock:
             self._last_tick_ts = time.time()
 
+    def assert_trading_allowed(self) -> None:
+        if not self.trading_authorized:
+            snap = self.snapshot()
+            raise RuntimeError(
+                f"trading not authorized: state={snap.state.value} reason={snap.reason}"
+            )
+
     def begin_recovery(self, *, reason: str = "") -> bool:
         with self._lock:
             if self._state not in (
