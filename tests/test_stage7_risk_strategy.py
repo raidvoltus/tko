@@ -139,6 +139,32 @@ def test_invalid_strength_blocked(tmp_path: Path):
     assert not dec.approved
 
 
+def test_entry_signal_none_blocked(tmp_path: Path):
+    risk = _risk(tmp_path)
+    dec = risk.evaluate_entry(symbol="BTC/IDR", quote_free=10_000_000, last_price=1000, signal=None)
+    assert not dec.approved
+    assert "signal" in dec.reason.lower()
+
+
+def test_reserve_rejects_nan_inf(tmp_path: Path):
+    risk = _risk(tmp_path)
+    for a in (float("nan"), float("inf"), float("-inf"), -1.0, 0.0):
+        ok, _ = risk.try_reserve_notional(a, reservation_id="bad")
+        assert not ok
+    assert risk.reserved_notional() == 0.0
+    ok, _ = risk.try_reserve_notional(100.0, reservation_id="good")
+    assert ok
+    assert risk.reserved_notional() == pytest.approx(100.0)
+
+
+def test_commit_rejects_nan_notional(tmp_path: Path):
+    risk = _risk(tmp_path)
+    risk.try_reserve_notional(200.0, reservation_id="cid")
+    risk.commit_reservation("cid", side="buy", symbol="X", actual_notional=float("nan"))
+    assert risk.reserved_notional() == 0.0
+    assert risk.pnl.today_notional() == 0.0
+
+
 def test_reservation_blocks_over_budget(tmp_path: Path):
     risk = _risk(tmp_path, _s(max_daily_notional=1_000_000, max_order_notional=800_000))
     ok, _ = risk.try_reserve_notional(800_000, reservation_id="a")
