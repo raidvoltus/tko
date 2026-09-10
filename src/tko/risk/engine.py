@@ -351,7 +351,7 @@ class RiskEngine:
             return RiskDecision(False, "computed size too small", 0.0, 0.0)
         return RiskDecision(True, "approved", size_quote, size_quote / last_price)
 
-    def evaluate_buy(
+    def size_buy_only(
         self,
         free_quote: float,
         last_price: float,
@@ -359,9 +359,26 @@ class RiskEngine:
         *,
         quote_asset: str | None = None,
     ) -> RiskDecision:
-        """Sizing-only (no signal required). Live entry must use evaluate_entry."""
+        """Quote sizing helper only — NOT production order authorization.
+
+        Does not accept or validate a strategy signal. Must never be used as a
+        gate to execution.buy / create_order. Live BUY authorization is solely
+        evaluate_entry(..., signal=signal, ...).
+        """
         return self._size_buy(
             free_quote, last_price, open_positions, quote_asset=quote_asset
+        )
+
+    def evaluate_buy(self, *args, **kwargs) -> RiskDecision:
+        """Removed as production authorization API.
+
+        Raises RuntimeError. Use evaluate_entry for live BUY, or size_buy_only
+        for pure sizing checks in tests/tools.
+        """
+        raise RuntimeError(
+            "evaluate_buy is not a production authorization path. "
+            "Use evaluate_entry(..., signal=...) for live BUY, "
+            "or size_buy_only(...) for sizing-only checks."
         )
 
     def evaluate_entry(
@@ -374,7 +391,7 @@ class RiskEngine:
         open_positions: int = 0,
         quote_asset: str | None = None,
     ) -> RiskDecision:
-        """Bot-facing entry gate. Requires explicit BUY signal; sizing-only callers use evaluate_buy."""
+        """Sole production BUY authorization gate. Requires explicit BUY signal."""
         if signal is None:
             return RiskDecision(False, "entry requires BUY signal", 0.0, 0.0)
         if not _extract_buy_signal(signal):
