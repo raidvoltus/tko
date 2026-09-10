@@ -28,6 +28,12 @@ def _settings(**kw) -> Settings:
         stop_loss_pct=1.0,
     )
     base.update(kw)
+    # Keep Settings validators happy when tests lower daily limit
+    if base.get("max_daily_notional", 0) and base.get("max_order_notional", 0):
+        if base["max_order_notional"] > base["max_daily_notional"]:
+            base["max_order_notional"] = base["max_daily_notional"]
+    if base.get("max_open_positions", 1) < 1:
+        base["max_open_positions"] = 1
     return Settings(**base)
 
 
@@ -248,9 +254,10 @@ def test_sell_capped_by_max_order_notional(tmp_path: Path):
 
 
 def test_strategy_signal_still_requires_risk_approval(tmp_path: Path):
-    risk = _risk(tmp_path, max_open_positions=0)
+    risk = _risk(tmp_path, max_open_positions=1)
+    # Cap reached via open_positions (Settings max_open_positions >= 1)
     dec = risk.evaluate_entry(
-        symbol="BTC/IDR", quote_free=10_000_000, last_price=1000, signal=Signal.BUY, open_positions=0
+        symbol="BTC/IDR", quote_free=10_000_000, last_price=1000, signal=Signal.BUY, open_positions=1
     )
     assert not dec.approved
 
