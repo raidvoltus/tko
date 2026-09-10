@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tko.core.redact import redact_mapping, redact_text
+
 logger = logging.getLogger(__name__)
 
 if os.name == "nt":
@@ -89,10 +91,10 @@ class AuditLog:
             "side": side,
             "quantity": quantity,
             "price": price,
-            "reason": reason,
+            "reason": redact_text(reason),
             "client_order_id": client_order_id,
             "exchange_order_id": exchange_order_id,
-            "extra": extra or {},
+            "extra": redact_mapping(extra or {}),
             "prev_hash": self._prev_hash,
         }
         payload = json.dumps(body, sort_keys=True, ensure_ascii=False, default=str)
