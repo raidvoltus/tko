@@ -95,7 +95,6 @@ class ExecutionEngine:
         """Reconcile UNKNOWN/RECON/PARTIAL and crash-orphaned SUBMITTING intents."""
         pending = list(self.intents.unresolved_for_recovery())
         for intent in pending:
-            # Promote SUBMITTING → UNKNOWN so recon authority owns the lifecycle
             if intent.status == OrderIntentStatus.SUBMITTING:
                 intent.status = OrderIntentStatus.UNKNOWN
                 intent.error_category = intent.error_category or "RECOVERY"
@@ -115,7 +114,6 @@ class ExecutionEngine:
         if self.s.max_order_notional > 0 and notional > float(self.s.max_order_notional) + 1e-9:
             return False, f"notional {notional:.4f} exceeds max_order_notional {self.s.max_order_notional:.4f}"
         if self.risk is not None and self.s.max_daily_notional > 0:
-            # S5-B1: count outstanding reservations so concurrent paths cannot overshoot
             used = self.risk.effective_daily_used()
             if used + notional > float(self.s.max_daily_notional) + 1e-9:
                 return False, (
@@ -125,11 +123,6 @@ class ExecutionEngine:
         return True, "ok"
 
     def _run_live_create_order(self, **kwargs):  # type: ignore[no-untyped-def]
-        """Race-safe LIVE POST: MUST go through LifecycleGovernor.run_authorized_submit.
-
-        Fail-closed: no lifecycle, or lifecycle without run_authorized_submit → no POST.
-        Never: trading_authorized boolean check then direct create_order (TOCTOU bypass).
-        """
         lc = self.lifecycle
         if lc is None:
             raise RuntimeError(
@@ -172,7 +165,6 @@ class ExecutionEngine:
         if intent is None:
             logger.warning("event=order_retry_blocked symbol=%s side=buy reason=active_intent", symbol)
             return None
-        # S5-B1: atomic reserve BEFORE SUBMITTING / LIVE POST
         if self.risk is not None and float(quote_amt) > 0:
             ok_r, r_reason = self.risk.try_reserve_notional(
                 float(quote_amt), reservation_id=intent.client_order_id
@@ -257,14 +249,12 @@ class ExecutionEngine:
             intent.error_category = exc.category.value
             intent.error_message = str(exc)[:300]
             if exc.ambiguous or is_ambiguous(exc.category):
-                # UNKNOWN: KEEP reservation (order may exist on exchange)
                 intent.status = OrderIntentStatus.UNKNOWN
                 self.intents.update(intent)
                 self._reconcile(intent)
                 if intent.status == OrderIntentStatus.CONFIRMED:
                     return self._result_from_intent(intent, side)
                 return None
-            # Definitive reject: RELEASE reservation
             intent.status = OrderIntentStatus.REJECTED
             self.intents.update(intent)
             if self.risk is not None:
@@ -276,7 +266,6 @@ class ExecutionEngine:
                     pass
             return None
         except Exception as exc:
-            # Ambiguous exception: KEEP reservation, go UNKNOWN
             intent.status = OrderIntentStatus.UNKNOWN
             intent.error_category = ErrorCategory.UNKNOWN_ERROR.value
             intent.error_message = str(exc)[:300]
@@ -285,7 +274,6 @@ class ExecutionEngine:
             if intent.status == OrderIntentStatus.CONFIRMED:
                 return self._result_from_intent(intent, side)
             return None
-        # S5-W2: distinguish full fill vs partial / still-open
         intent.exchange_order_id = result.id
         intent.filled = float(result.filled or 0.0)
         intent.average = result.average
@@ -388,13 +376,11 @@ class ExecutionEngine:
             quote_amount=float(intent.quote_amount or 0.0),
         )
 
-        # Durable barrier FIRST — if already journaled, only ensure applied
         is_new = self.fill_journal.try_record(event)
         if not is_new:
             if not self.fill_journal.is_applied(event_id):
                 self._apply_fill_event(event, intent=intent, base=base, quote=quote)
             else:
-                # Fully done previously; sync watermark if lagging
                 if previously < cumulative:
                     intent.accounted_filled = cumulative
                     intent.filled = cumulative
@@ -492,13 +478,19 @@ class ExecutionEngine:
             entry = self.load_entry_price(event.symbol) or avg
             notional = delta * avg
             pnl = (avg - entry) * delta if entry > 0 else 0.0
-            self.positions_store.reduce_or_close(event.symbol, delta)
-            if event.symbol in self.positions:
-                left = self.positions[event.symbol].amount - delta
-                if left <= 1e-12:
-                    self.positions.pop(event.symbol, None)
-                else:
-                    self.positions[event.symbol].amount = left
+            # Durable reduce first; sync memory from store (do NOT subtract twice —
+            # positions dict may hold the same StoredPosition object reference).
+            stored = self.positions_store.reduce_or_close(
+                event.symbol, delta, fill_event_id=event.event_id
+            )
+            if stored is None or stored.amount <= 1e-12:
+                self.positions.pop(event.symbol, None)
+            else:
+                self.positions[event.symbol] = PositionState(
+                    symbol=stored.symbol, base=stored.base, quote=stored.quote,
+                    amount=stored.amount, entry_price=stored.entry_price,
+                    opened_at=stored.opened_at,
+                )
             if intent is not None:
                 intent.accounted_filled = max(
                     float(getattr(intent, "accounted_filled", 0.0) or 0.0), cumulative
@@ -560,7 +552,6 @@ class ExecutionEngine:
             intent.error_message = refreshed.error_message
 
     def _result_from_intent(self, intent: OrderIntent, side: Side) -> OrderResult:
-        """Build OrderResult from intent without inventing a full-fill when partial."""
         amount = float(intent.normalized_base or intent.base_amount or 0.0)
         filled = float(intent.filled or 0.0)
         if intent.status == OrderIntentStatus.PARTIALLY_FILLED:
