@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from tko.core.config import Settings
+from tko.core.types import Side
 from tko.exchange.order_response import OrderLookupResult
 from tko.execution.engine import ExecutionEngine
 from tko.execution.fill_journal import FillJournal
@@ -190,3 +191,32 @@ def test_restart_after_partial_recon_deterministic(tmp_path: Path):
     eng2._reconcile(eng2.intents.by_client_id(intent.client_order_id))
     assert eng2.positions_store.get("BTC/IDR").amount == pytest.approx(0.4)
     assert eng2.risk.pnl.today_notional() == pytest.approx(400_000)
+
+
+def test_recon_all_with_on_confirmed_accounts_fill(tmp_path: Path):
+    """Startup path: reconcile_all MUST apply fills when on_confirmed is wired."""
+    eng = _build(tmp_path)
+    intent = eng.intents.create(symbol="BTC/IDR", side="buy", quote_amount=1e6, last_price=1e6)
+    intent.normalized_base = 1.0
+    eng.risk.try_reserve_notional(1e6, reservation_id=intent.client_order_id)
+    intent.status = OrderIntentStatus.UNKNOWN
+    eng.intents.update(intent)
+    eng.client.find_order_by_client_id = MagicMock(
+        return_value=OrderLookupResult.found(
+            _ex(cid=intent.client_order_id, filled=0.6, remaining=0.4, status="open")
+        )
+    )
+
+    def _on_confirmed(i):
+        side = Side.BUY if i.side == "buy" else Side.SELL
+        synthetic = eng._result_from_intent(i, side)
+        is_partial = i.status == OrderIntentStatus.PARTIALLY_FILLED
+        eng._on_fill_confirmed(
+            i, side, synthetic, base="BTC", quote="IDR",
+            partial=is_partial, remaining=float(synthetic.remaining or 0.0),
+        )
+
+    eng.reconciler.reconcile_all(None, on_confirmed=_on_confirmed)
+    assert eng.positions_store.get("BTC/IDR") is not None
+    assert eng.positions_store.get("BTC/IDR").amount == pytest.approx(0.6)
+    assert eng.risk.pnl.today_notional() == pytest.approx(600_000)
