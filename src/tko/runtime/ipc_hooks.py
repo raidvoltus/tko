@@ -77,5 +77,5 @@ def stop_ipc(bot: Any) -> None:
         try:
             ipc.stop()
         except Exception as exc:
-            logger.warning("event=ipc_stop_failed err=%s", exp)
+            logger.warning("event=ipc_stop_failed err=%s", exc)
         bot._ipc = None
