@@ -217,3 +217,89 @@ def test_bot_start_rejected_when_already_active(tmp_path: Path):
     m.start()
     m.start()
     assert m.starts == 1
+
+
+def test_assert_trading_allowed_raises_when_not_ready():
+    lc = LifecycleGovernor()
+    with pytest.raises(RuntimeError):
+        lc.assert_trading_allowed()
+    _to_ready(lc)
+    lc.assert_trading_allowed()
+
+
+def test_start_active_cleared_on_failed_startup_simulation():
+    class MiniBot:
+        def __init__(self):
+            self._start_lock = threading.Lock()
+            self._start_active = False
+            self._running = False
+            self._stop_requested = False
+            self.starts = 0
+            self.barrier_ok = False
+
+        def _clear_start_active(self):
+            with self._start_lock:
+                self._start_active = False
+
+        def _startup_barrier(self) -> bool:
+            return self.barrier_ok
+
+        def start(self):
+            with self._start_lock:
+                if self._start_active:
+                    return
+                self._start_active = True
+            self.starts += 1
+            self._running = True
+            self._stop_requested = False
+            if not self._startup_barrier():
+                self._running = False
+                self._clear_start_active()
+                return
+            self._clear_start_active()
+
+    m = MiniBot()
+    m.barrier_ok = False
+    m.start()
+    assert m.starts == 1
+    assert m._start_active is False
+    m.barrier_ok = True
+    m.start()
+    assert m.starts == 2
+
+
+def test_stop_idempotent_and_process_alive_false():
+    lc = LifecycleGovernor()
+    _to_ready(lc)
+    assert lc.snapshot().process_alive is True
+    lc.request_stop()
+    lc.mark_process_stopped()
+    assert lc.snapshot().process_alive is False
+    lc.force(LifecycleState.STOPPED, reason="shutdown_complete")
+    assert lc.state == LifecycleState.STOPPED
+    lc.force(LifecycleState.STOPPED, reason="again")
+    assert lc.state == LifecycleState.STOPPED
+
+
+def test_heartbeat_after_stop_carries_process_alive_false(tmp_path: Path):
+    hb_path = tmp_path / "hb.json"
+    hb = Heartbeat(hb_path)
+    hb.beat(lifecycle="READY", trading_authorized=True, process_alive=True)
+    assert hb.read()["process_alive"] is True
+    hb.beat(lifecycle="STOPPING", trading_authorized=False, process_alive=False)
+    data = hb.read()
+    assert data["process_alive"] is False
+    assert data["trading_authorized"] is False
+    hb.beat(lifecycle="STOPPED", trading_authorized=False, process_alive=False)
+    assert hb.read()["process_alive"] is False
+
+
+def test_production_bot_module_not_placeholder():
+    import tko.runtime.bot as bot_mod
+    src = Path(bot_mod.__file__).read_text(encoding="utf-8")
+    assert "class TradingBot" in src
+    assert "_start_active" in src
+    assert "mark_process_stopped" in src
+    assert "evaluate_entry" in src
+    assert "reconcile_all" in src
+    assert src.strip() != "PLACEHOLDER"
