@@ -68,26 +68,17 @@ _TRANSITIONS: dict[LifecycleState, frozenset[LifecycleState]] = {
     LifecycleState.DEGRADED: frozenset(
         {
             LifecycleState.RECOVERY,
-            LifecycleState.RECONCILING,
             LifecycleState.KILL,
             LifecycleState.HALTED,
             LifecycleState.STOPPING,
+            LifecycleState.RECONCILING,
         }
     ),
     LifecycleState.KILL: frozenset(
-        {
-            LifecycleState.RECOVERY,
-            LifecycleState.STOPPING,
-            LifecycleState.HALTED,
-        }
+        {LifecycleState.RECOVERY, LifecycleState.STOPPING, LifecycleState.HALTED}
     ),
-    LifecycleState.STOPPING: frozenset({LifecycleState.STOPPED}),
-    LifecycleState.STOPPED: frozenset(),
     LifecycleState.HALTED: frozenset(
-        {
-            LifecycleState.RECOVERY,
-            LifecycleState.STOPPING,
-        }
+        {LifecycleState.RECOVERY, LifecycleState.STOPPING, LifecycleState.KILL}
     ),
     LifecycleState.RECOVERY: frozenset(
         {
@@ -97,6 +88,8 @@ _TRANSITIONS: dict[LifecycleState, frozenset[LifecycleState]] = {
             LifecycleState.STOPPING,
         }
     ),
+    LifecycleState.STOPPING: frozenset({LifecycleState.STOPPED}),
+    LifecycleState.STOPPED: frozenset(),
 }
 
 
@@ -204,8 +197,6 @@ class LifecycleGovernor:
 
     def force(self, target: LifecycleState, *, reason: str = "") -> None:
         with self._lock:
-            # INV-51 / sole READY path: force(READY) always rejected from ANY state.
-            # Only authorize_ready() may enter READY after validation gates pass.
             if target == LifecycleState.READY:
                 logger.warning(
                     "event=lifecycle_force_rejected from=%s to=READY reason=use_authorize_ready",
@@ -226,6 +217,16 @@ class LifecycleGovernor:
                 reason[:200],
             )
 
+    def mark_process_stopped(self) -> None:
+        """Mark process not alive for heartbeat/watchdog (shutdown path)."""
+        with self._lock:
+            self._process_alive = False
+            logger.info("event=process_alive_false reason=shutdown")
+
+    def mark_process_alive(self) -> None:
+        with self._lock:
+            self._process_alive = True
+
     def mark_recon_ok(self) -> None:
         with self._lock:
             self._last_successful_recon_ts = time.time()
@@ -238,14 +239,7 @@ class LifecycleGovernor:
         with self._lock:
             self._last_tick_ts = time.time()
 
-    def assert_trading_allowed(self) -> None:
-        if not self.trading_authorized:
-            snap = self.snapshot()
-            raise RuntimeError(
-                f"trading not authorized: state={snap.state.value} reason={snap.reason}"
-            )
-
-    def begin_recovery(self, *, reason: str = "autonomous_recovery") -> bool:
+    def begin_recovery(self, *, reason: str = "") -> bool:
         with self._lock:
             if self._state not in (
                 LifecycleState.KILL,
@@ -253,34 +247,32 @@ class LifecycleGovernor:
                 LifecycleState.DEGRADED,
             ):
                 return False
-            if LifecycleState.RECOVERY not in _TRANSITIONS.get(self._state, frozenset()):
-                return False
             prev = self._state
             self._state = LifecycleState.RECOVERY
-            self._reason = reason[:300]
-            logger.info(
-                "event=runtime_recovery from=%s reason=%s kill_sticky=%s",
-                prev.value,
-                reason[:200],
-                self._kill_sticky,
-            )
+            self._reason = reason[:300] or "recovery"
+            logger.info("event=runtime_recovery from=%s reason=%s", prev.value, self._reason)
             return True
 
-    def complete_recovery_to_reconciling(self, *, reason: str = "recovery_recon") -> bool:
-        return self.transition(LifecycleState.RECONCILING, reason=reason)
+    def complete_recovery_to_reconciling(self, *, reason: str = "") -> bool:
+        with self._lock:
+            if self._state != LifecycleState.RECOVERY:
+                return False
+            self._state = LifecycleState.RECONCILING
+            self._reason = reason[:300] or "recovery_recon"
+            logger.info("event=runtime_reconciling from=RECOVERY reason=%s", self._reason)
+            return True
 
     def authorize_ready(
         self,
         *,
-        reason: str = "recovery_validated",
-        recon_ok: bool = False,
-        kill_switch_clear: bool = False,
-        circuit_clear: bool = False,
-        daily_risk_ok: bool = False,
-        positions_ok: bool = False,
-        exchange_ok: bool = False,
+        recon_ok: bool,
+        kill_switch_clear: bool,
+        circuit_clear: bool,
+        daily_risk_ok: bool,
+        positions_ok: bool,
+        exchange_ok: bool,
+        reason: str = "",
     ) -> bool:
-        """Sole path RECONCILING -> READY. Clears kill_sticky only after ALL gates pass."""
         with self._lock:
             if self._state != LifecycleState.RECONCILING:
                 logger.warning(
