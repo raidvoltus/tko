@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller one-folder for TKO (Windows 10+)
+# Credentials and runtime state are NEVER bundled — external paths only.
 
 from pathlib import Path
 
@@ -12,11 +13,18 @@ hiddenimports = [
     "tko.runtime",
     "tko.runtime.entrypoint",
     "tko.runtime.bot",
+    "tko.runtime.backup",
+    "tko.runtime.lifecycle",
+    "tko.runtime.watchdog",
+    "tko.runtime.instance_lock",
     "tko.exchange.tokocrypto",
     "tko.strategy.btc",
     "tko.risk.engine",
     "tko.execution.engine",
+    "tko.reconciliation.reconciler",
     "tko.notify.telegram",
+    "tko.core.redact",
+    "tko.core.credentials",
     "ccxt",
     "ccxt.tokocrypto",
 ]
