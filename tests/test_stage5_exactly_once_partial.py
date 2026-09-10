@@ -10,6 +10,7 @@ import pytest
 from tko.core.config import Settings
 from tko.core.types import OrderResult, OrderType, Side
 from tko.execution.engine import ExecutionEngine
+from tko.execution.fill_journal import FillJournal
 from tko.execution.intent import IntentStore
 from tko.risk.engine import RiskEngine
 from tko.risk.pnl_tracker import DailyPnLTracker
@@ -41,6 +42,7 @@ def _engine(tmp_path: Path) -> ExecutionEngine:
     eng.positions_store = PositionStore(tmp_path / "positions.json")
     eng.positions = {}
     eng.intents = IntentStore(tmp_path / "intents.json")
+    eng.fill_journal = FillJournal(tmp_path / "fill_events.jsonl")
     eng.reconciler = MagicMock()
     return eng
 
