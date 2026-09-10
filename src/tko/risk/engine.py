@@ -35,7 +35,7 @@ def _is_finite_number(x: object) -> bool:
 def _extract_buy_signal(signal: object | None) -> bool:
     """True if signal is BUY (Signal enum, TradeDecision, or string)."""
     if signal is None:
-        return True  # no signal constraint (sizing-only callers)
+        return False
     if signal is Signal.BUY or signal == Signal.BUY:
         return True
     inner = getattr(signal, "signal", None)
@@ -93,8 +93,9 @@ class RiskEngine:
             return float(self.pnl.today_notional()) + float(sum(self._reserved.values()))
 
     def try_reserve_notional(self, amount: float, *, reservation_id: str) -> tuple[bool, str]:
-        if amount <= 0:
-            return False, "reserve amount must be > 0"
+        if not _is_finite_number(amount) or float(amount) <= 0:
+            return False, "reserve amount must be finite and > 0"
+        amount = float(amount)
         rid = (reservation_id or "").strip()
         if not rid:
             return False, "reservation_id required"
@@ -143,6 +144,14 @@ class RiskEngine:
         fill_event_id: str = "",
     ) -> None:
         rid = (reservation_id or "").strip()
+        if not _is_finite_number(actual_notional):
+            logger.error("event=commit_reservation_rejected id=%s reason=non_finite_notional", rid)
+            if rid:
+                with self._budget_lock:
+                    self._reserved.pop(rid, None)
+            return
+        if not _is_finite_number(pnl):
+            pnl = 0.0
         with self._budget_lock:
             if rid:
                 self._reserved.pop(rid, None)
@@ -172,6 +181,14 @@ class RiskEngine:
         fill_event_id: str = "",
     ) -> tuple[bool, str]:
         rid = (reservation_id or "").strip()
+        if not _is_finite_number(filled_notional):
+            logger.error("event=partial_commit_rejected id=%s reason=non_finite_filled", rid)
+            return False, "non_finite_filled_notional"
+        if remaining_reserve is not None and not _is_finite_number(remaining_reserve):
+            logger.error("event=partial_commit_rejected id=%s reason=non_finite_residual", rid)
+            return False, "non_finite_remaining_reserve"
+        if not _is_finite_number(pnl):
+            pnl = 0.0
         with self._budget_lock:
             if rid:
                 self._reserved.pop(rid, None)
@@ -342,6 +359,7 @@ class RiskEngine:
         *,
         quote_asset: str | None = None,
     ) -> RiskDecision:
+        """Sizing-only (no signal required). Live entry must use evaluate_entry."""
         return self._size_buy(
             free_quote, last_price, open_positions, quote_asset=quote_asset
         )
@@ -356,10 +374,12 @@ class RiskEngine:
         open_positions: int = 0,
         quote_asset: str | None = None,
     ) -> RiskDecision:
-        """Bot-facing entry gate. Strategy may only signal; RiskEngine sizes and approves."""
+        """Bot-facing entry gate. Requires explicit BUY signal; sizing-only callers use evaluate_buy."""
+        if signal is None:
+            return RiskDecision(False, "entry requires BUY signal", 0.0, 0.0)
         if not _extract_buy_signal(signal):
             return RiskDecision(False, f"signal not BUY: {signal!r}", 0.0, 0.0)
-        strength = getattr(signal, "strength", None) if signal is not None else None
+        strength = getattr(signal, "strength", None)
         if strength is not None:
             if not _is_finite_number(strength) or float(strength) < 0:
                 return RiskDecision(False, "invalid signal strength", 0.0, 0.0)
