@@ -115,8 +115,6 @@ class TradingBot:
             self.lifecycle.mark_exchange_contact()
             free_map = {a: b.free for a, b in balances.items()}
             # S6: order/fill recon with fill accounting hook + position detect/align
-            # (no corrective trades). Must wire on_confirmed so exchange fills are
-            # applied exactly-once via the execution journal path.
             def _on_confirmed(intent):
                 side = Side.BUY if intent.side == "buy" else Side.SELL
                 synthetic = self.execution._result_from_intent(intent, side)
@@ -381,7 +379,7 @@ class TradingBot:
                 ticker = self.client.fetch_ticker(symbol)
                 last = float(ticker.last or 0)
             except Exception as exc:
-                logger.warning("ticker failed %s: %s", symbol, exp if False else exc)
+                logger.warning("ticker failed %s: %s", symbol, exc)
                 continue
             if last <= 0:
                 continue
