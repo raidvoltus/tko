@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import logging
 import threading
 from dataclasses import dataclass
@@ -20,6 +22,34 @@ class RiskDecision:
     reason: str
     size_quote: float
     size_base: float
+
+
+def _is_finite_number(x: object) -> bool:
+    try:
+        v = float(x)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(v)
+
+
+def _extract_buy_signal(signal: object | None) -> bool:
+    """True if signal is BUY (Signal enum, TradeDecision, or string)."""
+    if signal is None:
+        return True  # no signal constraint (sizing-only callers)
+    if signal is Signal.BUY or signal == Signal.BUY:
+        return True
+    inner = getattr(signal, "signal", None)
+    if inner is not None:
+        if inner is Signal.BUY or inner == Signal.BUY:
+            return True
+        if str(getattr(inner, "value", inner)).upper() in ("BUY", "SIGNAL.BUY"):
+            return True
+    val = getattr(signal, "value", None)
+    if val is not None and str(val).upper() == "BUY":
+        return True
+    if str(signal).upper() in ("BUY", "SIGNAL.BUY"):
+        return True
+    return False
 
 
 class RiskEngine:
@@ -51,26 +81,18 @@ class RiskEngine:
         )
         self.audit = audit
         self._equity_baseline = float(settings.daily_equity_baseline or 0.0)
-        # S5-B1: atomic daily-notional budget
         self._budget_lock = threading.RLock()
-        self._reserved: dict[str, float] = {}  # reservation_id → amount
+        self._reserved: dict[str, float] = {}
 
-    # ------------------------------------------------------------------ budget
     def reserved_notional(self) -> float:
         with self._budget_lock:
             return float(sum(self._reserved.values()))
 
     def effective_daily_used(self) -> float:
-        """Confirmed notional + outstanding reservations."""
         with self._budget_lock:
             return float(self.pnl.today_notional()) + float(sum(self._reserved.values()))
 
     def try_reserve_notional(self, amount: float, *, reservation_id: str) -> tuple[bool, str]:
-        """Atomically reserve *amount* against max_daily_notional.
-
-        Idempotent for the same reservation_id (re-reserve replaces prior amount).
-        Returns (ok, reason). Fail-closed when limit would be breached.
-        """
         if amount <= 0:
             return False, "reserve amount must be > 0"
         rid = (reservation_id or "").strip()
@@ -78,13 +100,11 @@ class RiskEngine:
             return False, "reservation_id required"
         limit = float(self.s.max_daily_notional or 0.0)
         with self._budget_lock:
-            # drop prior reservation for same id so re-entry is safe
             prior = float(self._reserved.pop(rid, 0.0))
             used = float(self.pnl.today_notional())
             outstanding = float(sum(self._reserved.values()))
             projected = used + outstanding + float(amount)
             if limit > 0 and projected > limit + 1e-9:
-                # restore prior if any
                 if prior > 0:
                     self._reserved[rid] = prior
                 reason = (
@@ -97,16 +117,11 @@ class RiskEngine:
             self._reserved[rid] = float(amount)
             logger.info(
                 "event=notional_reserved id=%s amount=%.4f used=%.4f outstanding=%.4f limit=%.4f",
-                rid,
-                amount,
-                used,
-                outstanding + amount,
-                limit,
+                rid, amount, used, outstanding + amount, limit,
             )
             return True, "reserved"
 
     def release_reservation(self, reservation_id: str) -> None:
-        """Drop a reservation without recording a fill (reject / cancelled path)."""
         rid = (reservation_id or "").strip()
         if not rid:
             return
@@ -127,7 +142,6 @@ class RiskEngine:
         client_order_id: str = "",
         fill_event_id: str = "",
     ) -> None:
-        """Release reservation and durable-record the fill under the same lock window."""
         rid = (reservation_id or "").strip()
         with self._budget_lock:
             if rid:
@@ -141,11 +155,7 @@ class RiskEngine:
                 client_order_id=client_order_id or rid,
                 fill_event_id=fill_event_id,
             )
-        logger.info(
-            "event=notional_committed id=%s actual=%.4f",
-            rid,
-            actual_notional,
-        )
+        logger.info("event=notional_committed id=%s actual=%.4f", rid, actual_notional)
         self.check_daily_limits_or_kill()
 
     def commit_partial_and_rereserve(
@@ -161,7 +171,6 @@ class RiskEngine:
         client_order_id: str = "",
         fill_event_id: str = "",
     ) -> tuple[bool, str]:
-        """Account filled portion and keep a residual reservation for open remainder (S5-W2)."""
         rid = (reservation_id or "").strip()
         with self._budget_lock:
             if rid:
@@ -181,7 +190,6 @@ class RiskEngine:
                 used = float(self.pnl.today_notional())
                 outstanding = float(sum(self._reserved.values()))
                 limit = float(self.s.max_daily_notional or 0.0)
-                # S5-B4: fail-closed — never let residual push used+reserved over limit
                 if limit > 0:
                     headroom = max(0.0, limit - used - outstanding)
                     if rem > headroom + 1e-9:
@@ -201,12 +209,6 @@ class RiskEngine:
         return True, "partial_committed"
 
     def rehydrate_reservations_from_intents(self, intents: list) -> int:
-        """Rebuild in-memory reservations from durable BUY intents after restart (S5-Recovery).
-
-        Intent.quote_amount is the SSOT for outstanding reserved budget while status is
-        still blocking (SUBMITTING/UNKNOWN/RECON/PARTIAL/GOVERNOR/…).
-        Already-committed fills live in the PnL ledger and must not be double-counted.
-        """
         restored = 0
         with self._budget_lock:
             self._reserved.clear()
@@ -217,7 +219,6 @@ class RiskEngine:
                 cid = str(getattr(intent, "client_order_id", "") or "").strip()
                 if not cid:
                     continue
-                # Prefer residual: quote_amount - filled*avg when partial
                 quote_amt = float(getattr(intent, "quote_amount", 0) or 0)
                 filled = float(getattr(intent, "filled", 0) or 0)
                 avg = getattr(intent, "average", None)
@@ -228,8 +229,7 @@ class RiskEngine:
                     continue
                 status = getattr(intent, "status", None)
                 status_val = getattr(status, "value", str(status or ""))
-                terminal = {"CONFIRMED", "REJECTED", "FAILED"}
-                if status_val in terminal:
+                if status_val in {"CONFIRMED", "REJECTED", "FAILED"}:
                     continue
                 self._reserved[cid] = residual
                 restored += 1
@@ -240,7 +240,6 @@ class RiskEngine:
         logger.info("event=reservation_rehydrate_done count=%d total=%.4f", restored, self.reserved_notional())
         return restored
 
-    # ----------------------------------------------------------- kill / equity
     def _risk_block(self, reason: str) -> None:
         if self.audit is not None:
             try:
@@ -289,7 +288,6 @@ class RiskEngine:
             return reason
         return None
 
-    # ----------------------------------------------------------- sizing helpers
     def _size_buy(
         self,
         free_quote: float,
@@ -304,6 +302,12 @@ class RiskEngine:
         breach = self.check_daily_limits_or_kill()
         if breach:
             return RiskDecision(False, breach, 0.0, 0.0)
+        if not _is_finite_number(free_quote) or float(free_quote) < 0:
+            return RiskDecision(False, "invalid free_quote", 0.0, 0.0)
+        if not _is_finite_number(last_price) or float(last_price) <= 0:
+            return RiskDecision(False, "invalid price", 0.0, 0.0)
+        free_quote = float(free_quote)
+        last_price = float(last_price)
         min_q = self.s.min_balance_for_quote(quote_asset or self.s.quote_asset)
         if free_quote < min_q:
             return RiskDecision(
@@ -311,13 +315,10 @@ class RiskEngine:
             )
         if open_positions >= self.s.max_open_positions:
             return RiskDecision(False, "max open positions reached", 0.0, 0.0)
-        if last_price <= 0:
-            return RiskDecision(False, "invalid price", 0.0, 0.0)
         size_quote = free_quote * (self.s.max_position_pct / 100.0)
         size_quote = min(size_quote, free_quote * 0.95)
         if self.s.max_order_notional > 0:
             size_quote = min(size_quote, float(self.s.max_order_notional))
-        # Use effective (confirmed + reserved) so concurrent approvals cannot overshoot
         if self.s.max_daily_notional > 0:
             used_eff = self.effective_daily_used()
             remaining = float(self.s.max_daily_notional) - used_eff
@@ -355,22 +356,13 @@ class RiskEngine:
         open_positions: int = 0,
         quote_asset: str | None = None,
     ) -> RiskDecision:
-        """Bot-facing entry gate (alias of evaluate_buy with named kwargs)."""
-        if signal is not None:
-            sig_ok = False
-            try:
-                if signal == Signal.BUY:
-                    sig_ok = True
-            except Exception:
-                pass
-            if not sig_ok:
-                val = getattr(signal, "value", None)
-                if val is not None and str(val).upper() == "BUY":
-                    sig_ok = True
-                elif str(signal).upper() in ("BUY", "SIGNAL.BUY"):
-                    sig_ok = True
-            if not sig_ok:
-                return RiskDecision(False, f"signal not BUY: {signal}", 0.0, 0.0)
+        """Bot-facing entry gate. Strategy may only signal; RiskEngine sizes and approves."""
+        if not _extract_buy_signal(signal):
+            return RiskDecision(False, f"signal not BUY: {signal!r}", 0.0, 0.0)
+        strength = getattr(signal, "strength", None) if signal is not None else None
+        if strength is not None:
+            if not _is_finite_number(strength) or float(strength) < 0:
+                return RiskDecision(False, "invalid signal strength", 0.0, 0.0)
         qa = quote_asset
         if qa is None and symbol and "/" in symbol:
             qa = symbol.split("/", 1)[1]
@@ -386,13 +378,15 @@ class RiskEngine:
         estimated_notional: float | None = None,
     ) -> RiskDecision:
         if self.kill_switch_active():
-            if free_base > 0:
-                return RiskDecision(True, "kill switch — force sell", 0.0, free_base)
+            if _is_finite_number(free_base) and float(free_base) > 0:
+                return RiskDecision(True, "kill switch — force sell", 0.0, float(free_base))
             return RiskDecision(False, "kill switch active", 0.0, 0.0)
-        if free_base <= 0:
+        if not _is_finite_number(free_base) or float(free_base) <= 0:
             return RiskDecision(False, "no base balance", 0.0, 0.0)
-        if last_price <= 0:
+        if not _is_finite_number(last_price) or float(last_price) <= 0:
             return RiskDecision(False, "invalid price", 0.0, 0.0)
+        free_base = float(free_base)
+        last_price = float(last_price)
         notional = (
             estimated_notional
             if estimated_notional is not None
@@ -419,7 +413,6 @@ class RiskEngine:
         entry_price: float | None = None,
         signal_sell: bool = False,
     ) -> RiskDecision:
-        """Bot-facing exit gate (alias of evaluate_sell with named kwargs)."""
         return self.evaluate_sell(
             free_base=base_free,
             entry_price=entry_price,
@@ -439,7 +432,6 @@ class RiskEngine:
         client_order_id: str = "",
         fill_event_id: str = "",
     ) -> None:
-        """Legacy fill recorder. Prefer commit_reservation when a reservation exists."""
         rid = (client_order_id or "").strip()
         with self._budget_lock:
             if rid and rid in self._reserved:
