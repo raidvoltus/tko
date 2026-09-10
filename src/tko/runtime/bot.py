@@ -42,7 +42,6 @@ class TradingBot:
         self.risk = RiskEngine(settings, state_dir, pnl_tracker=self.pnl, audit=self.audit)
         self.positions_store = PositionStore(state_dir / "positions.json")
         self.strategy = BtcAnalyzer(settings)
-        # Stage 5: ML is additive filter only (default OFF). Never bypasses risk/lifecycle.
         self.ml_filter = MlSignalFilter(
             enabled=bool(settings.ml_filter_enabled),
             model_path=Path(settings.ml_model_path) if settings.ml_model_path else None,
@@ -67,7 +66,7 @@ class TradingBot:
         self._running = False
         self._last_reconcile = 0.0
         self._stop_requested = False
-        self._recovery_attempts = 0  # monotonically increases for backoff only (INV-54)
+        self._recovery_attempts = 0
 
     def _hb(self, status: str | None = None) -> None:
         snap = self.lifecycle.snapshot()
@@ -84,7 +83,6 @@ class TradingBot:
         )
 
     def _recovery_backoff_sec(self) -> float:
-        """Bounded exponential backoff for autonomous recovery (INV-54). Never stops retrying."""
         exp = min(max(self._recovery_attempts - 1, 0), 6)
         return float(min(60.0, max(1.0, (2 ** exp) * max(1.0, self.s.loop_interval_sec / 5.0))))
 
@@ -116,16 +114,20 @@ class TradingBot:
             balances = self.client.fetch_balance()
             self.lifecycle.mark_exchange_contact()
             free_map = {a: b.free for a, b in balances.items()}
-            notes = self.positions_store.reconcile_with_balances(
-                free_map, min_dust=self.s.min_base_dust, stable_like=STABLE_LIKE
-            )
+            # S6: order/fill recon + position detect/align (no corrective trades)
+            recon = self.reconciler.reconcile_all(free_map)
             self.execution._hydrate_positions_memory()
             eq = sum(float(free_map.get(q, 0.0)) for q in self.s.quote_asset_list())
             self.risk.set_equity_baseline_if_empty(eq)
-            self.reconciler.reconcile_all(free_map)
+            if recon.notes:
+                logger.info("reconcile notes=%s", recon.notes)
+            if not recon.safe_to_trade:
+                self._halt(
+                    "position_discrepancy:"
+                    + ";".join(d.note for d in recon.position_discrepancies)[:280]
+                )
+                return False
             self.lifecycle.mark_recon_ok()
-            if notes:
-                logger.info("position reconcile notes=%s", notes)
         except Exception as exc:
             self._halt(f"startup_reconciliation_failed:{exc}")
             return False
@@ -409,30 +411,25 @@ class TradingBot:
             if self.ohlcv_store is not None:
                 try:
                     self.ohlcv_store.append(symbol, self.s.ohlcv_timeframe, ohlcv)
+                except Exception:
+                    pass
+            signal = self.strategy.analyze(ohlcv)
+            if self.ml_filter is not None and self.ml_filter.enabled:
+                try:
+                    signal = self.ml_filter.filter(signal, ohlcv)
                 except Exception as exc:
-                    logger.warning("ohlcv store append failed: %s", exc)
-            # Rule-based primary decision (BtcAnalyzer)
-            decision_td = self.strategy.analyze(ohlcv)
-            if decision_td.signal != Signal.BUY:
-                continue
-            # Optional ML filter — fail-closed for BUY when enabled without model
-            filt = self.ml_filter.filter(
-                decision_td,
-                ohlcv,
-                rsi_period=self.s.rsi_period,
-                ema_fast=self.s.ema_fast,
-                ema_slow=self.s.ema_slow,
-            )
-            if not filt.allow:
-                logger.info("event=ml_filter_block reason=%s", filt.reason)
-                continue
+                    logger.warning("ml filter failed: %s", exc)
+            open_n = len([p for p in self.positions_store.all() if p.amount > 0])
             decision = self.risk.evaluate_entry(
                 symbol=symbol,
                 quote_free=free_q,
                 last_price=last,
-                signal=decision_td.signal,
+                signal=signal,
+                open_positions=open_n,
+                quote_asset=quote,
             )
             if not decision.approved:
+                logger.info("entry blocked %s: %s", symbol, decision.reason)
                 continue
             if not self.lifecycle.trading_authorized:
                 return
