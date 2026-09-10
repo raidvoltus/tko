@@ -13,6 +13,16 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class PositionDiscrepancy:
+    symbol: str
+    base: str
+    store_amount: float
+    exchange_free: float
+    delta: float  # store - exchange_free (>0 means store overstates)
+    note: str
+
+
 @dataclass
 class StoredPosition:
     symbol: str
@@ -114,7 +124,6 @@ class PositionStore:
         fill_event_id: str = "",
     ) -> StoredPosition:
         with self._lock:
-            # S5-B5: skip if this fill event was already applied (crash replay)
             fid = (fill_event_id or "").strip()
             if fid and fid in self._applied_fill_ids:
                 existing = self._positions.get(symbol)
@@ -173,7 +182,6 @@ class PositionStore:
         fill_event_id: str = "",
     ) -> StoredPosition | None:
         with self._lock:
-            # S5 crash-window: skip if this fill event already reduced the store
             fid = (fill_event_id or "").strip()
             if fid and fid in self._applied_fill_ids:
                 return self._positions.get(symbol)
@@ -200,13 +208,52 @@ class PositionStore:
                 del self._positions[symbol]
                 self._save()
 
+    def detect_discrepancies(
+        self,
+        free_map: dict[str, float],
+        *,
+        min_dust: float = 1e-8,
+        stable_like: frozenset[str] | None = None,
+    ) -> list[PositionDiscrepancy]:
+        """Compare PositionStore vs exchange free balances. No mutation, no trades (S6)."""
+        _stables = stable_like or frozenset({"IDR", "USDT", "USDC", "BUSD", "USD"})
+        out: list[PositionDiscrepancy] = []
+        with self._lock:
+            for symbol, pos in list(self._positions.items()):
+                base = (pos.base or (symbol.split("/")[0] if "/" in symbol else symbol)).upper()
+                if base in _stables:
+                    continue
+                free = float(free_map.get(base, 0.0))
+                if free + min_dust < pos.amount:
+                    delta = float(pos.amount) - free
+                    out.append(
+                        PositionDiscrepancy(
+                            symbol=symbol,
+                            base=base,
+                            store_amount=float(pos.amount),
+                            exchange_free=free,
+                            delta=delta,
+                            note=(
+                                f"store_overstates {symbol}: store={pos.amount:.8f} "
+                                f"exchange_free={free:.8f}"
+                            ),
+                        )
+                    )
+        return out
+
     def reconcile_with_balances(
         self,
         free_map: dict[str, float],
         *,
         min_dust: float = 1e-8,
         stable_like: frozenset[str] | None = None,
+        apply_align: bool = True,
     ) -> list[str]:
+        """Align internal store DOWN to exchange free when overstated.
+
+        S6 rule: never place corrective BUY/SELL. Only adjust internal accounting
+        to the exchange SSOT for free base, and report notes for audit.
+        """
         _stables = stable_like or frozenset({"IDR", "USDT", "USDC", "BUSD", "USD"})
         notes: list[str] = []
         with self._lock:
@@ -222,11 +269,13 @@ class PositionStore:
                     notes.append(
                         f"shrunk {symbol}: store={pos.amount:.8f} exchange_free={free:.8f}"
                     )
-                    pos.amount = free
-                    pos.updated_at = time.time()
-            for symbol in to_delete:
-                self._positions.pop(symbol, None)
-            self._save()
+                    if apply_align:
+                        pos.amount = free
+                        pos.updated_at = time.time()
+            if apply_align:
+                for symbol in to_delete:
+                    self._positions.pop(symbol, None)
+                self._save()
         for n in notes:
             logger.info("event=position_reconcile %s", n)
         return notes
