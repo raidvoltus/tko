@@ -109,6 +109,32 @@ class Reconciler:
             )
             st = (validated.status or "").lower()
             remaining = float(validated.remaining or 0.0)
+            filled_qty = float(validated.filled or 0.0)
+
+            # S6-A: terminal exchange failure statuses — do not invent success
+            terminal_fail = {
+                "canceled", "cancelled", "rejected", "expired", "expired_in_match",
+            }
+            if st in terminal_fail and filled_qty <= 1e-12:
+                intent.status = OrderIntentStatus.REJECTED
+                intent.error_category = f"EXCHANGE_{st.upper()}"
+                intent.error_message = f"exchange status={st}"
+                self.intents.update(intent)
+                if self.audit:
+                    self.audit.record(
+                        "RECONCILE_RESULT",
+                        symbol=intent.symbol,
+                        side=intent.side,
+                        client_order_id=cid,
+                        exchange_order_id=intent.exchange_order_id,
+                        reason=f"rejected_{st}",
+                        quantity=0.0,
+                    )
+                logger.info(
+                    "event=reconcile_exchange_rejected cid=%s status=%s", cid, st
+                )
+                return intent
+
             if remaining > 1e-12 and st in (
                 "open", "partial", "partially_filled", "new", "accepted", "pending",
             ):
@@ -116,6 +142,7 @@ class Reconciler:
                 intent.error_category = ""
                 intent.error_message = f"partial remaining={remaining}"
             else:
+                # FILLED / closed / canceled-with-fill / etc. → account filled qty once
                 intent.status = OrderIntentStatus.CONFIRMED
                 intent.error_category = ""
                 intent.error_message = ""
@@ -127,11 +154,16 @@ class Reconciler:
                     side=intent.side,
                     client_order_id=cid,
                     exchange_order_id=intent.exchange_order_id,
-                    reason="confirmed",
+                    reason=(
+                        "confirmed"
+                        if intent.status == OrderIntentStatus.CONFIRMED
+                        else "partial"
+                    ),
                     quantity=intent.filled,
                     price=intent.average,
                 )
-            if on_confirmed:
+            # S6-B: only account when there is executed quantity
+            if filled_qty > 1e-12 and on_confirmed:
                 try:
                     on_confirmed(intent)
                 except Exception as exc:
