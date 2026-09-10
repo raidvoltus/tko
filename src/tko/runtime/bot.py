@@ -9,7 +9,7 @@ from pathlib import Path
 from tko.audit.audit_log import AuditLog
 from tko.core.config import Settings
 from tko.core.credentials import load_telegram, load_tokocrypto
-from tko.core.types import Signal
+from tko.core.types import OrderType, Side, Signal
 from tko.exchange.tokocrypto import TokocryptoClient
 from tko.execution.engine import ExecutionEngine
 from tko.notify.telegram import TelegramNotifier
@@ -114,8 +114,23 @@ class TradingBot:
             balances = self.client.fetch_balance()
             self.lifecycle.mark_exchange_contact()
             free_map = {a: b.free for a, b in balances.items()}
-            # S6: order/fill recon + position detect/align (no corrective trades)
-            recon = self.reconciler.reconcile_all(free_map)
+            # S6: order/fill recon with fill accounting hook + position detect/align
+            # (no corrective trades). Must wire on_confirmed so exchange fills are
+            # applied exactly-once via the execution journal path.
+            def _on_confirmed(intent):
+                side = Side.BUY if intent.side == "buy" else Side.SELL
+                synthetic = self.execution._result_from_intent(intent, side)
+                base = intent.symbol.split("/")[0] if "/" in intent.symbol else ""
+                quote = intent.symbol.split("/")[1] if "/" in intent.symbol else ""
+                from tko.execution.intent import OrderIntentStatus
+                is_partial = intent.status == OrderIntentStatus.PARTIALLY_FILLED
+                rem = float(synthetic.remaining or 0.0)
+                self.execution._on_fill_confirmed(
+                    intent, side, synthetic, base=base, quote=quote,
+                    partial=is_partial, remaining=rem,
+                )
+
+            recon = self.reconciler.reconcile_all(free_map, on_confirmed=_on_confirmed)
             self.execution._hydrate_positions_memory()
             eq = sum(float(free_map.get(q, 0.0)) for q in self.s.quote_asset_list())
             self.risk.set_equity_baseline_if_empty(eq)
@@ -366,7 +381,7 @@ class TradingBot:
                 ticker = self.client.fetch_ticker(symbol)
                 last = float(ticker.last or 0)
             except Exception as exc:
-                logger.warning("ticker failed %s: %s", symbol, exc)
+                logger.warning("ticker failed %s: %s", symbol, exp if False else exc)
                 continue
             if last <= 0:
                 continue
