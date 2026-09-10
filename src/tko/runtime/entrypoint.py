@@ -238,6 +238,13 @@ def cmd_uninstall_service(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def cmd_gui(_: argparse.Namespace) -> int:
+    """Launch desktop control panel (IPC client only; does not stop Core on exit)."""
+    from tko.gui.app import main as gui_main
+
+    return gui_main()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="tko", description="TKO Tokocrypto LIVE bot")
     parser.add_argument("--version", action="store_true")
@@ -249,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status").set_defaults(func=cmd_status)
     sub.add_parser("stop").set_defaults(func=cmd_stop)
     sub.add_parser("backup").set_defaults(func=cmd_backup)
+    sub.add_parser("gui").set_defaults(func=cmd_gui)
 
     p_wd = sub.add_parser("watchdog")
     p_wd.add_argument("--stale-after", type=float, default=None)
@@ -258,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     p_install = sub.add_parser("install-service")
     p_install.add_argument("--task-name", default="TkoBot")
     p_install.add_argument("--force", action="store_true")
-    p_install.add_argument("--use-system", action="store_true")
+    p_install.add_argument("--use_system", action="store_true")
     p_install.set_defaults(func=cmd_install_service)
 
     p_uninstall = sub.add_parser("uninstall-service")
