@@ -14,7 +14,7 @@ from tko.exchange.order_response import (
     validate_order_payload,
 )
 from tko.execution.intent import IntentStore, OrderIntent, OrderIntentStatus
-from tko.risk.position_store import PositionStore
+from tko.risk.position_store import PositionDiscrepancy, PositionStore
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,8 @@ class ReconcileResult:
     intents_governor: int = 0
     intents_still_reconciling: int = 0
     positions_adjusted: int = 0
+    position_discrepancies: list[PositionDiscrepancy] = field(default_factory=list)
+    safe_to_trade: bool = True
     notes: list[str] = field(default_factory=list)
 
 
@@ -111,7 +113,6 @@ class Reconciler:
             remaining = float(validated.remaining or 0.0)
             filled_qty = float(validated.filled or 0.0)
 
-            # S6-A: terminal exchange failure statuses — do not invent success
             terminal_fail = {
                 "canceled", "cancelled", "rejected", "expired", "expired_in_match",
             }
@@ -142,7 +143,6 @@ class Reconciler:
                 intent.error_category = ""
                 intent.error_message = f"partial remaining={remaining}"
             else:
-                # FILLED / closed / canceled-with-fill / etc. → account filled qty once
                 intent.status = OrderIntentStatus.CONFIRMED
                 intent.error_category = ""
                 intent.error_message = ""
@@ -162,7 +162,6 @@ class Reconciler:
                     quantity=intent.filled,
                     price=intent.average,
                 )
-            # S6-B: only account when there is executed quantity
             if filled_qty > 1e-12 and on_confirmed:
                 try:
                     on_confirmed(intent)
@@ -233,15 +232,38 @@ class Reconciler:
                 result.notes.append(f"reconciling {updated.client_order_id}")
 
         if free_map is not None and self.positions is not None:
+            disc = self.positions.detect_discrepancies(free_map, min_dust=self.min_dust)
+            result.position_discrepancies = list(disc)
+            if disc:
+                result.safe_to_trade = False
+                for d in disc:
+                    result.notes.append(d.note)
+                    logger.critical(
+                        "event=position_discrepancy symbol=%s store=%.8f free=%.8f",
+                        d.symbol, d.store_amount, d.exchange_free,
+                    )
             notes = self.positions.reconcile_with_balances(free_map, min_dust=self.min_dust)
             result.positions_adjusted = len(notes)
             result.notes.extend(notes)
+            residual = self.positions.detect_discrepancies(free_map, min_dust=self.min_dust)
+            if residual:
+                result.safe_to_trade = False
+                result.position_discrepancies = list(residual)
+            elif disc:
+                result.safe_to_trade = True
+                result.notes.append("position_store_aligned_to_exchange")
+
+        if result.intents_governor > 0:
+            result.notes.append(f"governor_blocked_intents={result.intents_governor}")
 
         logger.info(
-            "event=reconcile_done checked=%d confirmed=%d governor=%d still=%d",
+            "event=reconcile_done checked=%d confirmed=%d governor=%d still=%d "
+            "safe_to_trade=%s discrepancies=%d",
             result.intents_checked,
             result.intents_confirmed,
             result.intents_governor,
             result.intents_still_reconciling,
+            result.safe_to_trade,
+            len(result.position_discrepancies),
         )
         return result
