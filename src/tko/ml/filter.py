@@ -37,11 +37,18 @@ class MlSignalFilter:
         model_path: Path | None = None,
         min_confidence: float = 0.55,
         model: Any | None = None,
+        governor: Any | None = None,
+        pool: Any | None = None,
+        ensemble: Any | None = None,
     ) -> None:
         self.enabled = enabled
         self.min_confidence = min_confidence
         self._model = model
         self._model_path = Path(model_path) if model_path else None
+        # Stage 5.1 optional hooks (default None = no change to Stage 5 behaviour)
+        self.governor = governor
+        self.pool = pool
+        self.ensemble = ensemble
         if self.enabled and self._model is None and self._model_path and self._model_path.exists():
             try:
                 self._model = load_model(self._model_path)
@@ -60,6 +67,11 @@ class MlSignalFilter:
     ) -> FilterDecision:
         if not self.enabled:
             return FilterDecision(True, rule.signal, 0, 0.0, "ml_filter_disabled")
+        # Stage 5.1: SAFE_EXIT suppresses BUY only; SELL remains free
+        if self.governor is not None and getattr(self.governor, "should_hold_only", lambda: False)():
+            if rule.signal == Signal.SELL:
+                return FilterDecision(True, rule.signal, 0, 0.0, "governor_safe_exit_allow_sell")
+            return FilterDecision(False, rule.signal, 0, 0.0, "governor_safe_exit")
         if rule.signal == Signal.HOLD:
             return FilterDecision(True, rule.signal, 0, 0.0, "hold_passthrough")
         if not sklearn_available() or self._model is None:
