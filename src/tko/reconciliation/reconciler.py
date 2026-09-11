@@ -95,7 +95,7 @@ class Reconciler:
                 validated = validate_order_payload(
                     lookup.order,
                     expected_client_order_id=cid,
-                    require_client_id_match=False,
+                    require_client_id_match=True,
                 )
             except InvalidOrderResponse as exc:
                 intent.error_category = "INVALID_RESPONSE"
@@ -105,7 +105,6 @@ class Reconciler:
                 return intent
 
             intent.exchange_order_id = validated.id
-            # Monotonic fill watermark: never decrease on out-of-order exchange snapshots
             incoming_filled = float(validated.filled or 0.0)
             prior_filled = float(intent.filled or 0.0)
             prior_accounted = float(getattr(intent, "accounted_filled", 0.0) or 0.0)
@@ -116,8 +115,6 @@ class Reconciler:
             )
             st = (validated.status or "").lower()
             remaining = float(validated.remaining or 0.0)
-            # If exchange reports lower remaining after we already saw higher fill,
-            # recompute remaining from amount when available.
             try:
                 amount = float(validated.amount or 0.0)
                 if amount > 0 and filled_qty > incoming_filled:
@@ -125,10 +122,25 @@ class Reconciler:
             except (TypeError, ValueError):
                 pass
 
-            terminal_fail = {
+            TERMINAL_FAIL = frozenset({
                 "canceled", "cancelled", "rejected", "expired", "expired_in_match",
-            }
-            if st in terminal_fail and filled_qty <= 1e-12:
+            })
+            OPEN_PARTIAL = frozenset({
+                "open", "partial", "partially_filled", "new", "accepted", "pending",
+            })
+            FILLED_OK = frozenset({
+                "closed", "filled", "done", "complete", "completed",
+            })
+
+            if not st:
+                intent.status = OrderIntentStatus.UNKNOWN
+                intent.error_category = "UNKNOWN_STATUS"
+                intent.error_message = "exchange status missing/empty — reconciliation required"
+                self.intents.update(intent)
+                logger.warning("event=reconcile_unknown_status cid=%s status=<empty>", cid)
+                return intent
+
+            if st in TERMINAL_FAIL and filled_qty <= 1e-12:
                 intent.status = OrderIntentStatus.REJECTED
                 intent.error_category = f"EXCHANGE_{st.upper()}"
                 intent.error_message = f"exchange status={st}"
@@ -148,16 +160,24 @@ class Reconciler:
                 )
                 return intent
 
-            if remaining > 1e-12 and st in (
-                "open", "partial", "partially_filled", "new", "accepted", "pending",
-            ):
+            if st in OPEN_PARTIAL:
                 intent.status = OrderIntentStatus.PARTIALLY_FILLED
                 intent.error_category = ""
                 intent.error_message = f"partial remaining={remaining}"
-            else:
+            elif st in FILLED_OK or (st in TERMINAL_FAIL and filled_qty > 1e-12):
                 intent.status = OrderIntentStatus.CONFIRMED
                 intent.error_category = ""
                 intent.error_message = ""
+            else:
+                intent.status = OrderIntentStatus.UNKNOWN
+                intent.error_category = "UNKNOWN_STATUS"
+                intent.error_message = f"unmapped exchange status={st!r} — reconciliation required"
+                self.intents.update(intent)
+                logger.warning(
+                    "event=reconcile_unknown_status cid=%s status=%r filled=%.8f",
+                    cid, st, filled_qty,
+                )
+                return intent
             self.intents.update(intent)
             if self.audit:
                 self.audit.record(
@@ -178,7 +198,7 @@ class Reconciler:
                 try:
                     on_confirmed(intent)
                 except Exception as exc:
-                    logger.warning("on_confirmed hook failed: %s", exc)
+                    logger.warning("on_confirmed hook failed: %s", exp if False else exc)
             return intent
 
         if lookup.status == OrderLookupStatus.NOT_FOUND:
