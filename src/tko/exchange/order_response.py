@@ -64,14 +64,23 @@ def validate_order_payload(
 
     resp_cid = raw.get("clientOrderId") or raw.get("clientOrderID") or raw.get("clientId")
     if resp_cid is not None:
-        resp_cid = str(resp_cid)
-    if expected_client_order_id and resp_cid is not None and resp_cid != str(expected_client_order_id):
-        raise InvalidOrderResponse(
-            f"clientOrderId mismatch: expected={expected_client_order_id} got={resp_cid}"
-        )
+        resp_cid = str(resp_cid).strip() or None
+    if expected_client_order_id:
+        exp = str(expected_client_order_id).strip()
+        if not resp_cid:
+            raise InvalidOrderResponse(
+                f"clientOrderId missing in response (expected={exp})"
+            )
+        if resp_cid != exp:
+            raise InvalidOrderResponse(
+                f"clientOrderId mismatch: expected={exp} got={resp_cid}"
+            )
+    elif require_client_id_match and not resp_cid:
+        raise InvalidOrderResponse("clientOrderId required but missing in response")
 
     symbol = raw.get("symbol")
     side = raw.get("side")
+    status = str(raw.get("status") or "")
     return ValidatedOrder(
         id=str(oid).strip(),
         filled=float(filled),
@@ -79,44 +88,33 @@ def validate_order_payload(
         amount=float(amount),
         average=average,
         price=price,
-        status=str(raw.get("status") or "unknown"),
-        client_order_id=resp_cid if resp_cid is not None else (expected_client_order_id or None),
+        status=status,
+        client_order_id=resp_cid,
         symbol=str(symbol) if symbol is not None else None,
-        side=str(side).lower() if side is not None else None,
+        side=str(side) if side is not None else None,
     )
 
 
 class OrderLookupStatus(str, Enum):
-    """Explicit recon lookup outcome — never collapse QUERY_FAILED into NOT_FOUND."""
-
     FOUND = "FOUND"
     NOT_FOUND = "NOT_FOUND"
     QUERY_FAILED = "QUERY_FAILED"
 
 
+@dataclass(frozen=True, slots=True)
 class OrderLookupResult:
-    """Typed result for find_order_by_client_id (INV-18)."""
-
-    __slots__ = ("status", "order", "error")
-
-    def __init__(
-        self,
-        status: OrderLookupStatus,
-        order: dict | None = None,
-        error: str | None = None,
-    ) -> None:
-        self.status = status
-        self.order = order
-        self.error = error
+    status: OrderLookupStatus
+    order: dict | None = None
+    error: str | None = None
 
     @classmethod
     def found(cls, order: dict) -> "OrderLookupResult":
-        return cls(OrderLookupStatus.FOUND, order=order)
+        return cls(status=OrderLookupStatus.FOUND, order=order)
 
     @classmethod
     def not_found(cls) -> "OrderLookupResult":
-        return cls(OrderLookupStatus.NOT_FOUND)
+        return cls(status=OrderLookupStatus.NOT_FOUND)
 
     @classmethod
     def query_failed(cls, error: str) -> "OrderLookupResult":
-        return cls(OrderLookupStatus.QUERY_FAILED, error=error)
+        return cls(status=OrderLookupStatus.QUERY_FAILED, error=error)
