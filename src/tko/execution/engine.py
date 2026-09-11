@@ -224,6 +224,27 @@ class ExecutionEngine:
         return self._submit(intent, side=Side.SELL, base_amount=float(norm), quote_amount=None, base=base or "", quote=quote or "")
 
     def _submit(self, intent: OrderIntent, *, side: Side, base_amount: float, quote_amount: float | None, base: str, quote: str) -> OrderResult | None:
+        # Stage 6-H: never re-POST after ambiguous submit. UNKNOWN/RECON/PARTIAL/
+        # GOVERNOR_AUTONOMOUS must only reconcile — exchange may already have the order.
+        _no_repost = frozenset({
+            OrderIntentStatus.UNKNOWN,
+            OrderIntentStatus.RECONCILIATION,
+            OrderIntentStatus.PARTIALLY_FILLED,
+            OrderIntentStatus.GOVERNOR_AUTONOMOUS,
+            OrderIntentStatus.CONFIRMED,
+            OrderIntentStatus.MANUAL_REVIEW,
+        })
+        if intent.status in _no_repost:
+            logger.warning(
+                "event=submit_blocked_no_repost cid=%s status=%s — reconcile only",
+                intent.client_order_id, intent.status.value,
+            )
+            self._reconcile(intent)
+            refreshed = self.intents.by_client_id(intent.client_order_id)
+            if refreshed is not None and refreshed.status == OrderIntentStatus.CONFIRMED:
+                return self._result_from_intent(refreshed, side)
+            return None
+
         intent.status = OrderIntentStatus.SUBMITTING
         intent.attempts += 1
         self.intents.update(intent)
