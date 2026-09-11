@@ -105,13 +105,25 @@ class Reconciler:
                 return intent
 
             intent.exchange_order_id = validated.id
-            intent.filled = validated.filled
+            # Monotonic fill watermark: never decrease on out-of-order exchange snapshots
+            incoming_filled = float(validated.filled or 0.0)
+            prior_filled = float(intent.filled or 0.0)
+            prior_accounted = float(getattr(intent, "accounted_filled", 0.0) or 0.0)
+            filled_qty = max(incoming_filled, prior_filled, prior_accounted)
+            intent.filled = filled_qty
             intent.average = (
                 validated.average if validated.average is not None else validated.price
             )
             st = (validated.status or "").lower()
             remaining = float(validated.remaining or 0.0)
-            filled_qty = float(validated.filled or 0.0)
+            # If exchange reports lower remaining after we already saw higher fill,
+            # recompute remaining from amount when available.
+            try:
+                amount = float(validated.amount or 0.0)
+                if amount > 0 and filled_qty > incoming_filled:
+                    remaining = max(0.0, amount - filled_qty)
+            except (TypeError, ValueError):
+                pass
 
             terminal_fail = {
                 "canceled", "cancelled", "rejected", "expired", "expired_in_match",
