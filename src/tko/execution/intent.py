@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 
 class OrderIntentStatus(str, Enum):
     PENDING = "PENDING"
+    CLIENT_ID_ASSIGNED = "CLIENT_ID_ASSIGNED"
+    PRE_TRADE_VALIDATION = "PRE_TRADE_VALIDATION"
+    PERSISTED = "PERSISTED"
+    NORMALIZED = "NORMALIZED"
+    SUBMITTING = "SUBMITTING"
     SUBMITTED = "SUBMITTED"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
     CONFIRMED = "CONFIRMED"
@@ -25,19 +30,32 @@ class OrderIntentStatus(str, Enum):
     FAILED = "FAILED"
     UNKNOWN = "UNKNOWN"
     RECONCILIATION = "RECONCILIATION"
+    GOVERNOR_AUTONOMOUS = "GOVERNOR_AUTONOMOUS"
 
 
 # Statuses that block a new intent with the same client_order_id (no-repost guard).
 BLOCKS_DUPLICATE = frozenset(
     {
         OrderIntentStatus.PENDING,
+        OrderIntentStatus.CLIENT_ID_ASSIGNED,
+        OrderIntentStatus.PRE_TRADE_VALIDATION,
+        OrderIntentStatus.PERSISTED,
+        OrderIntentStatus.NORMALIZED,
+        OrderIntentStatus.SUBMITTING,
         OrderIntentStatus.SUBMITTED,
         OrderIntentStatus.PARTIALLY_FILLED,
         OrderIntentStatus.UNKNOWN,
         OrderIntentStatus.RECONCILIATION,
+        OrderIntentStatus.GOVERNOR_AUTONOMOUS,
         OrderIntentStatus.CONFIRMED,
     }
 )
+
+
+def generate_client_order_id(side: str, symbol: str, strategy: str = "btc") -> str:
+    """Stable client order id: tko-{side}-{symbol}-{strategy}-{uuid}."""
+    sym = (symbol or "").replace("/", "").replace("-", "")[:12]
+    return f"tko-{side[:1]}-{sym}-{strategy}-{uuid.uuid4().hex[:12]}"
 
 
 @dataclass
@@ -58,6 +76,7 @@ class OrderIntent:
     updated_at: float = field(default_factory=time.time)
     notes: str = ""
     last_error: str = ""
+    strategy: str = "btc"
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -65,29 +84,30 @@ class OrderIntent:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "OrderIntent":
-        status_raw = d.get("status", "PENDING")
+    def from_dict(cls, data: dict[str, Any]) -> "OrderIntent":
+        status_raw = data.get("status", "PENDING")
         try:
             status = OrderIntentStatus(status_raw)
         except ValueError:
             status = OrderIntentStatus.UNKNOWN
         return cls(
-            client_order_id=str(d.get("client_order_id") or ""),
-            symbol=str(d.get("symbol") or ""),
-            side=str(d.get("side") or ""),
-            order_type=str(d.get("order_type") or ""),
-            quote_amount=float(d.get("quote_amount") or 0),
-            base_amount=float(d.get("base_amount") or 0),
-            price=(float(d["price"]) if d.get("price") is not None else None),
+            client_order_id=str(data.get("client_order_id") or ""),
+            symbol=str(data.get("symbol") or ""),
+            side=str(data.get("side") or ""),
+            order_type=str(data.get("order_type") or ""),
+            quote_amount=float(data.get("quote_amount") or 0),
+            base_amount=float(data.get("base_amount") or 0),
+            price=(float(data["price"]) if data.get("price") is not None else None),
             status=status,
-            exchange_order_id=str(d.get("exchange_order_id") or ""),
-            filled=float(d.get("filled") or 0),
-            average=(float(d["average"]) if d.get("average") is not None else None),
-            remaining=(float(d["remaining"]) if d.get("remaining") is not None else None),
-            created_at=float(d.get("created_at") or time.time()),
-            updated_at=float(d.get("updated_at") or time.time()),
-            notes=str(d.get("notes") or ""),
-            last_error=str(d.get("last_error") or ""),
+            exchange_order_id=str(data.get("exchange_order_id") or ""),
+            filled=float(data.get("filled") or 0),
+            average=(float(data["average"]) if data.get("average") is not None else None),
+            remaining=(float(data["remaining"]) if data.get("remaining") is not None else None),
+            created_at=float(data.get("created_at") or time.time()),
+            updated_at=float(data.get("updated_at") or time.time()),
+            notes=str(data.get("notes") or ""),
+            last_error=str(data.get("last_error") or ""),
+            strategy=str(data.get("strategy") or "btc"),
         )
 
 
@@ -98,7 +118,7 @@ class IntentStore:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._intents: dict[str, OrderIntent] = {}
+        self._items: dict[str, OrderIntent] = {}
         self.corrupted: bool = False
         self.corruption_reason: str = ""
         self._load()
@@ -124,17 +144,17 @@ class IntentStore:
                 if not intent.client_order_id:
                     intent.client_order_id = str(k)
                 loaded[intent.client_order_id] = intent
-            self._intents = loaded
+            self._items = loaded
         except Exception as exc:
             self.corrupted = True
             self.corruption_reason = f"intent store load failed: {exc}"
-            self._intents = {}
+            self._items = {}
             logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
 
-    def _persist(self) -> None:
+    def _save(self) -> None:
         if self.corrupted:
             raise RuntimeError(f"intent store corrupted: {self.corruption_reason}")
-        payload = {"intents": {k: v.to_dict() for k, v in self._intents.items()}}
+        payload = {"intents": {k: v.to_dict() for k, v in self._items.items()}}
         tmp = self.path.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, indent=2))
@@ -145,13 +165,30 @@ class IntentStore:
                 pass
         tmp.replace(self.path)
 
-    def get(self, client_order_id: str) -> OrderIntent | None:
-        with self._lock:
-            return self._intents.get(client_order_id)
-
-    def all(self) -> list[OrderIntent]:
-        with self._lock:
-            return list(self._intents.values())
+    def create(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quote_amount: float = 0.0,
+        base_amount: float = 0.0,
+        price: float | None = None,
+        client_order_id: str | None = None,
+        strategy: str = "btc",
+    ) -> OrderIntent:
+        if self.corrupted:
+            raise RuntimeError(f"intent store corrupted: {self.corruption_reason}")
+        return self._create_unlocked(
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            quote_amount=quote_amount,
+            base_amount=base_amount,
+            price=price,
+            client_order_id=client_order_id,
+            strategy=strategy,
+        )
 
     def create_if_absent(
         self,
@@ -163,85 +200,136 @@ class IntentStore:
         base_amount: float = 0.0,
         price: float | None = None,
         client_order_id: str | None = None,
+        strategy: str = "btc",
     ) -> OrderIntent:
         if self.corrupted:
             raise RuntimeError(f"intent store corrupted: {self.corruption_reason}")
-        cid = (client_order_id or "").strip() or f"tko-{uuid.uuid4().hex[:16]}"
+        cid = (client_order_id or "").strip()
+        if not cid:
+            cid = generate_client_order_id(side, symbol, strategy)
         with self._lock:
-            existing = self._intents.get(cid)
+            existing = self._items.get(cid)
             if existing is not None:
                 if existing.status in BLOCKS_DUPLICATE:
                     raise RuntimeError(
                         f"no-repost: client_order_id={cid} already exists status={existing.status.value}"
                     )
                 return existing
-            intent = OrderIntent(
-                client_order_id=cid,
+            return self._create_unlocked(
                 symbol=symbol,
                 side=side,
                 order_type=order_type,
-                quote_amount=float(quote_amount or 0),
-                base_amount=float(base_amount or 0),
+                quote_amount=quote_amount,
+                base_amount=base_amount,
                 price=price,
+                client_order_id=cid,
+                strategy=strategy,
             )
-            self._intents[cid] = intent
-            self._persist()
-            return intent
+
+    def _create_unlocked(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quote_amount: float = 0.0,
+        base_amount: float = 0.0,
+        price: float | None = None,
+        client_order_id: str | None = None,
+        strategy: str = "btc",
+    ) -> OrderIntent:
+        cid = (client_order_id or "").strip() or generate_client_order_id(side, symbol, strategy)
+        intent = OrderIntent(
+            client_order_id=cid,
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            quote_amount=float(quote_amount or 0),
+            base_amount=float(base_amount or 0),
+            price=price,
+            strategy=strategy,
+        )
+        self._items[cid] = intent
+        self._save()
+        return intent
 
     def update(self, intent: OrderIntent) -> None:
         if self.corrupted:
             raise RuntimeError(f"intent store corrupted: {self.corruption_reason}")
         intent.updated_at = time.time()
         with self._lock:
-            self._intents[intent.client_order_id] = intent
-            self._persist()
+            self._items[intent.client_order_id] = intent
+            self._save()
 
-    def mark(
-        self,
-        client_order_id: str,
-        status: OrderIntentStatus,
-        *,
-        exchange_order_id: str = "",
-        filled: float | None = None,
-        average: float | None = None,
-        remaining: float | None = None,
-        notes: str = "",
-        last_error: str = "",
-    ) -> OrderIntent | None:
-        if self.corrupted:
-            raise RuntimeError(f"intent store corrupted: {self.corruption_reason}")
+    def by_client_id(self, client_order_id: str) -> OrderIntent | None:
         with self._lock:
-            intent = self._intents.get(client_order_id)
-            if intent is None:
-                return None
-            intent.status = status
-            if exchange_order_id:
-                intent.exchange_order_id = exchange_order_id
-            if filled is not None:
-                intent.filled = float(filled)
-            if average is not None:
-                intent.average = float(average)
-            if remaining is not None:
-                intent.remaining = float(remaining)
-            if notes:
-                intent.notes = notes
-            if last_error:
-                intent.last_error = last_error
-            intent.updated_at = time.time()
-            self._persist()
-            return intent
+            return self._items.get(client_order_id)
 
-    def open_or_unknown(self) -> list[OrderIntent]:
+    def has_blocking_intent(self, symbol: str, side: str) -> bool:
+        with self._lock:
+            for i in self._items.values():
+                if i.symbol == symbol and i.side == side and i.status in BLOCKS_DUPLICATE:
+                    return True
+            return False
+
+    def unresolved_unknown(self) -> list[OrderIntent]:
         with self._lock:
             return [
                 i
-                for i in self._intents.values()
-                if i.status
-                in (
-                    OrderIntentStatus.PENDING,
-                    OrderIntentStatus.SUBMITTED,
-                    OrderIntentStatus.PARTIALLY_FILLED,
-                    OrderIntentStatus.UNKNOWN,
-                    OrderIntentStatus.RECONCILIATION,
-                )
+                for i in self._items.values()
+                if i.status in (OrderIntentStatus.UNKNOWN, OrderIntentStatus.RECONCILIATION)
+            ]
+
+    def unresolved_for_recovery(self) -> list[OrderIntent]:
+        recover = (
+            OrderIntentStatus.PENDING,
+            OrderIntentStatus.CLIENT_ID_ASSIGNED,
+            OrderIntentStatus.PRE_TRADE_VALIDATION,
+            OrderIntentStatus.PERSISTED,
+            OrderIntentStatus.NORMALIZED,
+            OrderIntentStatus.SUBMITTING,
+            OrderIntentStatus.SUBMITTED,
+            OrderIntentStatus.PARTIALLY_FILLED,
+            OrderIntentStatus.UNKNOWN,
+            OrderIntentStatus.RECONCILIATION,
+            OrderIntentStatus.GOVERNOR_AUTONOMOUS,
+        )
+        with self._lock:
+            return [i for i in self._items.values() if i.status in recover]
+
+    def buy_intents_holding_budget(self) -> list[OrderIntent]:
+        """BUY intents whose notional must count toward reserved budget after restart."""
+        holding = (
+            OrderIntentStatus.SUBMITTING,
+            OrderIntentStatus.NORMALIZED,
+            OrderIntentStatus.UNKNOWN,
+            OrderIntentStatus.RECONCILIATION,
+            OrderIntentStatus.PARTIALLY_FILLED,
+            OrderIntentStatus.GOVERNOR_AUTONOMOUS,
+            OrderIntentStatus.PRE_TRADE_VALIDATION,
+            OrderIntentStatus.PERSISTED,
+            OrderIntentStatus.CLIENT_ID_ASSIGNED,
+        )
+        with self._lock:
+            return [
+                i
+                for i in self._items.values()
+                if i.side == "buy" and i.status in holding and float(i.quote_amount or 0) > 0
+            ]
+
+    def governor_intents(self) -> list[OrderIntent]:
+        """Intents escalated to GOVERNOR_AUTONOMOUS (still duplicate-blocking)."""
+        with self._lock:
+            return [
+                i
+                for i in self._items.values()
+                if i.status == OrderIntentStatus.GOVERNOR_AUTONOMOUS
+            ]
+
+    def blocking_intents(self, symbol: str, side: str) -> list[OrderIntent]:
+        with self._lock:
+            return [
+                i
+                for i in self._items.values()
+                if i.symbol == symbol and i.side == side and i.status in BLOCKS_DUPLICATE
             ]
