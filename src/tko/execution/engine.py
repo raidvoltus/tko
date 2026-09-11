@@ -224,6 +224,27 @@ class ExecutionEngine:
         return self._submit(intent, side=Side.SELL, base_amount=float(norm), quote_amount=None, base=base or "", quote=quote or "")
 
     def _submit(self, intent: OrderIntent, *, side: Side, base_amount: float, quote_amount: float | None, base: str, quote: str) -> OrderResult | None:
+        # Stage 6-H: never re-POST after ambiguous submit. UNKNOWN/RECON/PARTIAL/
+        # GOVERNOR_AUTONOMOUS must only reconcile — exchange may already have the order.
+        _no_repost = frozenset({
+            OrderIntentStatus.UNKNOWN,
+            OrderIntentStatus.RECONCILIATION,
+            OrderIntentStatus.PARTIALLY_FILLED,
+            OrderIntentStatus.GOVERNOR_AUTONOMOUS,
+            OrderIntentStatus.CONFIRMED,
+            OrderIntentStatus.MANUAL_REVIEW,
+        })
+        if intent.status in _no_repost:
+            logger.warning(
+                "event=submit_blocked_no_repost cid=%s status=%s — reconcile only",
+                intent.client_order_id, intent.status.value,
+            )
+            self._reconcile(intent)
+            refreshed = self.intents.by_client_id(intent.client_order_id)
+            if refreshed is not None and refreshed.status == OrderIntentStatus.CONFIRMED:
+                return self._result_from_intent(refreshed, side)
+            return None
+
         intent.status = OrderIntentStatus.SUBMITTING
         intent.attempts += 1
         self.intents.update(intent)
@@ -431,49 +452,47 @@ class ExecutionEngine:
                 self.intents.update(intent)
 
             if self.risk is not None:
-                if event.partial:
+                try:
                     quote_total = float(event.quote_amount or 0.0)
                     accounted_notional = float(cumulative * avg) if avg > 0 else 0.0
                     residual = max(0.0, quote_total - accounted_notional)
-                    if residual <= 0 and event.remaining > 0 and avg > 0:
-                        residual = event.remaining * avg
-                    self.risk.commit_partial_and_rereserve(
-                        event.client_order_id,
-                        side="buy",
+                    if residual < 1.0 or not event.partial:
+                        self.risk.release_reservation(event.client_order_id or "")
+                    self.risk.pnl.record_trade(
                         symbol=event.symbol,
-                        filled_notional=float(event.notional),
-                        remaining_reserve=residual,
-                        pnl=0.0,
-                        order_id=event.order_id,
-                        client_order_id=event.client_order_id,
+                        side="buy",
+                        qty=delta,
+                        price=avg,
+                        notional=notional if (notional := float(event.notional)) else delta * avg,
                         fill_event_id=event.event_id,
                     )
-                else:
-                    self.risk.commit_reservation(
-                        event.client_order_id,
-                        side="buy",
-                        symbol=event.symbol,
-                        actual_notional=float(event.notional),
-                        pnl=0.0,
-                        order_id=event.order_id,
-                        client_order_id=event.client_order_id,
-                        fill_event_id=event.event_id,
-                    )
+                except Exception as exc:
+                    logger.warning("BUY pnl/reservation update failed: %s", exp if (exp := None) else exc)
+
         elif side == Side.SELL and delta > 1e-12:
-            entry = self.load_entry_price(event.symbol) or avg
+            entry = 0.0
+            if intent is not None and intent.average:
+                entry = float(intent.average)
+            stored = self.positions_store.get(event.symbol)
+            if stored is not None and stored.entry_price > 0:
+                entry = stored.entry_price
+            mem = self.positions.get(event.symbol)
+            if mem is not None and mem.entry_price > 0:
+                entry = mem.entry_price
             notional = delta * avg
             pnl = (avg - entry) * delta if entry > 0 else 0.0
-            stored = self.positions_store.reduce_or_close(
+            self.positions_store.reduce(
                 event.symbol, delta, fill_event_id=event.event_id
             )
-            if stored is None or stored.amount <= 1e-12:
-                self.positions.pop(event.symbol, None)
-            else:
-                self.positions[event.symbol] = PositionState(
-                    symbol=stored.symbol, base=stored.base, quote=stored.quote,
-                    amount=stored.amount, entry_price=stored.entry_price,
-                    opened_at=stored.opened_at,
-                )
+            if mem is not None:
+                left = max(0.0, mem.amount - delta)
+                if left <= 1e-12:
+                    self.positions.pop(event.symbol, None)
+                else:
+                    self.positions[event.symbol] = PositionState(
+                        symbol=mem.symbol, base=mem.base, quote=mem.quote,
+                        amount=left, entry_price=mem.entry_price, opened_at=mem.opened_at,
+                    )
             if intent is not None:
                 intent.accounted_filled = max(
                     float(getattr(intent, "accounted_filled", 0.0) or 0.0), cumulative
@@ -481,15 +500,18 @@ class ExecutionEngine:
                 intent.filled = max(float(intent.filled or 0.0), cumulative)
                 self.intents.update(intent)
             if self.risk is not None:
-                self.risk.record_fill(
-                    side="sell",
-                    symbol=event.symbol,
-                    notional=notional,
-                    pnl=pnl,
-                    order_id=event.order_id,
-                    client_order_id=event.client_order_id,
-                    fill_event_id=event.event_id,
-                )
+                try:
+                    self.risk.pnl.record_trade(
+                        symbol=event.symbol,
+                        side="sell",
+                        qty=delta,
+                        price=avg,
+                        notional=notional,
+                        realized_pnl=pnl,
+                        fill_event_id=event.event_id,
+                    )
+                except Exception as exc:
+                    logger.warning("SELL pnl update failed: %s", exc)
 
         self.fill_journal.mark_applied(event.event_id)
         logger.info(
@@ -498,11 +520,7 @@ class ExecutionEngine:
         )
 
     def _replay_unapplied_fills(self) -> None:
-        pending = self.fill_journal.unapplied_events()
-        if not pending:
-            return
-        logger.warning("event=fill_journal_replay count=%d", len(pending))
-        for event in pending:
+        for event in self.fill_journal.unapplied_events():
             intent = self.intents.by_client_id(event.client_order_id)
             self._apply_fill_event(event, intent=intent)
 
@@ -532,7 +550,6 @@ class ExecutionEngine:
             intent.attempts = refreshed.attempts
             intent.error_category = refreshed.error_category
             intent.error_message = refreshed.error_message
-            # S6-A: exchange terminal reject with zero fill → release reservation
             if (
                 refreshed.status == OrderIntentStatus.REJECTED
                 and self.risk is not None
@@ -558,9 +575,9 @@ class ExecutionEngine:
             type=OrderType.MARKET,
             amount=amount,
             price=intent.average,
-            status=status,
+            average=intent.average,
             filled=filled,
             remaining=remaining,
-            average=intent.average,
-            client_order_id=intent.client_order_id,
+            status=status,
+            client_order_id=intent.client_order_id or "",
         )
