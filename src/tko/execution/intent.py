@@ -24,7 +24,7 @@ class OrderIntentStatus(str, Enum):
     NORMALIZED = "NORMALIZED"
     SUBMITTING = "SUBMITTING"
     CONFIRMED = "CONFIRMED"
-    PARTIALLY_FILLED = "PARTIALLY_FILLED"  # open remainder; still blocking
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
     REJECTED = "REJECTED"
     UNKNOWN = "UNKNOWN"
     RECONCILIATION = "RECONCILIATION"
@@ -34,9 +34,6 @@ class OrderIntentStatus(str, Enum):
     FAILED = "FAILED"
 
 
-# S5-B2 / INV-61: UNKNOWN and GOVERNOR_AUTONOMOUS MUST remain in this set.
-# GOVERNOR_AUTONOMOUS is terminal for duplicate-blocking until operator/account-level
-# resolution — never auto-clear to allow a new order for the same symbol/side.
 BLOCKS_DUPLICATE = frozenset(
     {
         OrderIntentStatus.SUBMITTING,
@@ -79,7 +76,6 @@ class OrderIntent:
     attempts: int = 0
     exchange_order_id: str = ""
     filled: float = 0.0
-    # S5-B3: cumulative exchange fill already applied to position/PnL (exactly-once)
     accounted_filled: float = 0.0
     average: float | None = None
     error_category: str = ""
@@ -129,25 +125,55 @@ class IntentStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._items: dict[str, OrderIntent] = {}
+        self.corrupted: bool = False
+        self.corruption_reason: str = ""
         self._load()
 
     def _load(self) -> None:
         if not self.path.exists():
             return
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            raw_text = self.path.read_text(encoding="utf-8")
+            if not raw_text.strip():
+                self.corrupted = True
+                self.corruption_reason = "intent store file is empty"
+                self._items = {}
+                logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
+                return
+            raw = json.loads(raw_text)
             items = raw.get("intents") if isinstance(raw, dict) else raw
             if not isinstance(items, list):
+                self.corrupted = True
+                self.corruption_reason = "intent store schema invalid"
+                self._items = {}
+                logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
                 return
+            loaded: dict = {}
             for item in items:
-                if isinstance(item, dict):
-                    intent = OrderIntent.from_dict(item)
-                    self._items[intent.client_order_id] = intent
+                if not isinstance(item, dict):
+                    self.corrupted = True
+                    self.corruption_reason = "intent non-dict entry"
+                    self._items = {}
+                    logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
+                    return
+                intent = OrderIntent.from_dict(item)
+                if not intent.client_order_id:
+                    self.corrupted = True
+                    self.corruption_reason = "missing client_order_id"
+                    self._items = {}
+                    logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
+                    return
+                loaded[intent.client_order_id] = intent
+            self._items = loaded
+            self.corrupted = False
+            self.corruption_reason = ""
         except Exception as exc:
-            logger.warning("intent load failed: %s", exc)
+            self.corrupted = True
+            self.corruption_reason = f"intent load failed: {type(exc).__name__}: {exc}"
+            self._items = {}
+            logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
 
     def _save(self) -> None:
-        """Atomic replace with best-effort fsync (S5-W1 durability)."""
         payload = {"intents": [i.to_dict() for i in self._items.values()]}
         tmp = self.path.with_suffix(".tmp")
         data = json.dumps(payload, indent=2)
@@ -181,13 +207,9 @@ class IntentStore:
     ) -> OrderIntent:
         with self._lock:
             return self._create_unlocked(
-                symbol=symbol,
-                side=side,
-                base_amount=base_amount,
-                quote_amount=quote_amount,
-                last_price=last_price,
-                reason=reason,
-                strategy=strategy,
+                symbol=symbol, side=side, base_amount=base_amount,
+                quote_amount=quote_amount, last_price=last_price,
+                reason=reason, strategy=strategy,
             )
 
     def create_if_absent(
@@ -201,8 +223,10 @@ class IntentStore:
         reason: str = "",
         strategy: str = "btc",
     ) -> OrderIntent | None:
-        """Atomic check+create under lock. None if blocking intent exists (INV-19)."""
         with self._lock:
+            if self.corrupted:
+                logger.critical("event=intent_create_blocked reason=store_corrupted")
+                return None
             for intent in self._items.values():
                 if (
                     intent.symbol == symbol
@@ -211,13 +235,9 @@ class IntentStore:
                 ):
                     return None
             return self._create_unlocked(
-                symbol=symbol,
-                side=side,
-                base_amount=base_amount,
-                quote_amount=quote_amount,
-                last_price=last_price,
-                reason=reason,
-                strategy=strategy,
+                symbol=symbol, side=side, base_amount=base_amount,
+                quote_amount=quote_amount, last_price=last_price,
+                reason=reason, strategy=strategy,
             )
 
     def _create_unlocked(
@@ -270,13 +290,10 @@ class IntentStore:
         return False
 
     def unresolved_unknown(self) -> list[OrderIntent]:
-        """Intents mid-reconciliation (not yet terminal)."""
         with self._lock:
             return [
-                i
-                for i in self._items.values()
-                if i.status
-                in (
+                i for i in self._items.values()
+                if i.status in (
                     OrderIntentStatus.UNKNOWN,
                     OrderIntentStatus.RECONCILIATION,
                     OrderIntentStatus.PARTIALLY_FILLED,
@@ -284,11 +301,6 @@ class IntentStore:
             ]
 
     def unresolved_for_recovery(self) -> list[OrderIntent]:
-        """Crash-recovery set: SUBMITTING + UNKNOWN + RECON + PARTIAL (S5-Recovery).
-
-        SUBMITTING must be included so a crash after POST but before response
-        still re-enters reconciliation by the same client_order_id.
-        """
         recover = (
             OrderIntentStatus.SUBMITTING,
             OrderIntentStatus.UNKNOWN,
@@ -299,7 +311,6 @@ class IntentStore:
             return [i for i in self._items.values() if i.status in recover]
 
     def buy_intents_holding_budget(self) -> list[OrderIntent]:
-        """BUY intents whose notional must count toward reserved budget after restart."""
         holding = (
             OrderIntentStatus.SUBMITTING,
             OrderIntentStatus.NORMALIZED,
@@ -313,24 +324,20 @@ class IntentStore:
         )
         with self._lock:
             return [
-                i
-                for i in self._items.values()
+                i for i in self._items.values()
                 if i.side == "buy" and i.status in holding and float(i.quote_amount or 0) > 0
             ]
 
     def governor_intents(self) -> list[OrderIntent]:
-        """Intents escalated to GOVERNOR_AUTONOMOUS (still duplicate-blocking)."""
         with self._lock:
             return [
-                i
-                for i in self._items.values()
+                i for i in self._items.values()
                 if i.status == OrderIntentStatus.GOVERNOR_AUTONOMOUS
             ]
 
     def blocking_intents(self, symbol: str, side: str) -> list[OrderIntent]:
         with self._lock:
             return [
-                i
-                for i in self._items.values()
+                i for i in self._items.values()
                 if i.symbol == symbol and i.side == side and i.status in BLOCKS_DUPLICATE
             ]
