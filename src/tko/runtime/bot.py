@@ -115,3 +115,377 @@ class TradingBot:
         except Exception:
             pass
         logger.critical("event=runtime_halted reason=%s", reason[:300])
+
+    def _startup_barrier(self) -> bool:
+        self.lifecycle.force(LifecycleState.STARTING, reason="startup")
+        self._hb("STARTING")
+        self.audit.record("DECISION", reason="runtime_starting")
+        try:
+            self.client.connect()
+            self.lifecycle.mark_exchange_contact()
+        except Exception as exc:
+            self._halt(f"exchange_connect_failed:{exc}")
+            return False
+        self.lifecycle.transition(LifecycleState.RECONCILING, reason="startup_recon")
+        self._hb("RECONCILING")
+        self.audit.record("DECISION", reason="runtime_reconciling")
+        try:
+            balances = self.client.fetch_balance()
+            self.lifecycle.mark_exchange_contact()
+            free_map = {a: b.free for a, b in balances.items()}
+
+            def _on_confirmed(intent):
+                side = Side.BUY if intent.side == "buy" else Side.SELL
+                synthetic = self.execution._result_from_intent(intent, side)
+                base = intent.symbol.split("/")[0] if "/" in intent.symbol else ""
+                quote = intent.symbol.split("/")[1] if "/" in intent.symbol else ""
+                from tko.execution.intent import OrderIntentStatus
+                is_partial = intent.status == OrderIntentStatus.PARTIALLY_FILLED
+                rem = float(synthetic.remaining or 0.0)
+                self.execution._on_fill_confirmed(
+                    intent, side, synthetic, base=base, quote=quote,
+                    partial=is_partial, remaining=rem,
+                )
+
+            recon = self.reconciler.reconcile_all(free_map, on_confirmed=_on_confirmed)
+            self.execution._hydrate_positions_memory()
+            eq = sum(float(free_map.get(q, 0.0)) for q in self.s.quote_asset_list())
+            self.risk.set_equity_baseline_if_empty(eq)
+            if recon.notes:
+                logger.info("reconcile notes=%s", recon.notes)
+            if not recon.safe_to_trade:
+                self._halt(
+                    "position_discrepancy:"
+                    + ";".join(d.note for d in recon.position_discrepancies)[:280]
+                )
+                return False
+            self.lifecycle.mark_recon_ok()
+        except Exception as exc:
+            self._halt(f"startup_reconciliation_failed:{exc}")
+            return False
+        recon_ok = True
+        positions_ok = True
+        exchange_ok = True
+
+        if self.risk.kill_switch_active():
+            self.lifecycle.transition(LifecycleState.KILL, reason="kill_switch_active_on_startup")
+            self._hb("KILL")
+            self.metrics.set_status("KILL")
+            self.audit.record("ERROR", reason="kill_switch_active_on_startup")
+            return False
+        kill_switch_clear = True
+
+        if self.client.circuit_open:
+            self._halt(f"circuit_open:{self.client.circuit_reason}")
+            return False
+        circuit_clear = True
+
+        day = self.pnl.stats_for_day()
+        self.metrics.update_pnl(day.day, day.realized_pnl, day.notional_traded)
+        breach = self.risk.check_daily_limits_or_kill()
+        if breach:
+            self.lifecycle.transition(LifecycleState.KILL, reason=breach)
+            self._hb("KILL")
+            self.metrics.set_status("KILL", breach)
+            self.audit.record("ERROR", reason=f"daily_risk_block:{breach[:200]}")
+            try:
+                self.notify.send(f"TKO KILL (pre-ready risk): {breach[:300]}")
+            except Exception:
+                pass
+            return False
+        daily_risk_ok = True
+
+        if getattr(self.execution.intents, "corrupted", False):
+            self._halt(f"intent_store_corrupted:{getattr(self.execution.intents, 'corruption_reason', '')[:200]}")
+            return False
+        if getattr(self.positions_store, "corrupted", False):
+            self._halt(f"position_store_corrupted:{getattr(self.positions_store, 'corruption_reason', '')[:200]}")
+            return False
+        if getattr(self.risk, "baseline_corrupted", False):
+            self._halt(f"risk_baseline_corrupted:{getattr(self.risk, 'baseline_corruption_reason', '')[:200]}")
+            return False
+
+        if not self.lifecycle.authorize_ready(
+            reason="startup_ok",
+            recon_ok=recon_ok,
+            kill_switch_clear=kill_switch_clear,
+            circuit_clear=circuit_clear,
+            daily_risk_ok=daily_risk_ok,
+            positions_ok=positions_ok,
+            exchange_ok=exchange_ok,
+        ):
+            self._halt("cannot_enter_ready:validation_gates_failed")
+            return False
+        self.metrics.set_status("OK")
+        self._hb("READY")
+        self.audit.record("DECISION", reason="runtime_ready", extra={"day": day.day})
+        try:
+            self.notify.send(f"TKO READY LIVE day={day.day} pnl={day.realized_pnl:.4f}")
+        except Exception:
+            pass
+        logger.info("event=runtime_ready loop_interval=%.0fs", self.s.loop_interval_sec)
+        return True
+
+    def start(self) -> None:
+        with self._start_lock:
+            if self._start_active:
+                logger.warning("event=start_rejected reason=already_running")
+                return
+            self._start_active = True
+        self._running = True
+        self._stop_requested = False
+        self._recovery_attempts = 0
+        self.lifecycle.mark_process_alive()
+        self._start_ipc()
+        if not self._startup_barrier():
+            logger.error("Startup barrier failed - autonomous recovery may retry")
+            while self._running and not self._stop_requested:
+                self._hb()
+                if self.lifecycle.state in (LifecycleState.STOPPING, LifecycleState.STOPPED):
+                    self._clear_start_active()
+                    return
+                if self.lifecycle.state in (LifecycleState.HALTED, LifecycleState.KILL, LifecycleState.RECOVERY):
+                    self._recovery_attempts += 1
+                    backoff = self._recovery_backoff_sec()
+                    logger.warning(
+                        "event=autonomous_recovery phase=startup attempt=%s backoff=%.1fs state=%s",
+                        self._recovery_attempts,
+                        backoff,
+                        self.lifecycle.state.value,
+                    )
+                    time.sleep(backoff)
+                    if self.lifecycle.state == LifecycleState.KILL and self.risk.kill_switch_active():
+                        logger.warning("event=kill_recovery_blocked reason=kill_switch_still_active")
+                        continue
+                    if self.lifecycle.state == LifecycleState.RECOVERY:
+                        self.lifecycle.complete_recovery_to_reconciling(reason="startup_recovery_progress")
+                    elif self.lifecycle.begin_recovery(reason=f"startup_recovery_{self._recovery_attempts}"):
+                        self.lifecycle.complete_recovery_to_reconciling(reason="startup_recovery_recon")
+                    if self.lifecycle.state in (LifecycleState.RECONCILING, LifecycleState.STARTING):
+                        if self._startup_barrier():
+                            self._recovery_attempts = 0
+                            break
+                    continue
+                time.sleep(self.s.loop_interval_sec)
+            else:
+                self._clear_start_active()
+                return
+        try:
+            while self._running and not self._stop_requested:
+                if not self.lifecycle.trading_authorized:
+                    self._hb()
+                    if self.lifecycle.state == LifecycleState.KILL:
+                        self._recovery_attempts += 1
+                        backoff = self._recovery_backoff_sec()
+                        time.sleep(backoff)
+                        if self.risk.kill_switch_active():
+                            continue
+                        if self.lifecycle.begin_recovery(reason=f"kill_recovery_{self._recovery_attempts}"):
+                            self.lifecycle.complete_recovery_to_reconciling(reason="kill_recovery_recon")
+                            if self._startup_barrier():
+                                self._recovery_attempts = 0
+                        continue
+                    if self.lifecycle.state in (LifecycleState.STOPPING, LifecycleState.STOPPED):
+                        break
+                    if self.lifecycle.state == LifecycleState.HALTED:
+                        self._recovery_attempts += 1
+                        time.sleep(self._recovery_backoff_sec())
+                        if self.lifecycle.begin_recovery(reason=f"auto_recovery_{self._recovery_attempts}"):
+                            self.lifecycle.complete_recovery_to_reconciling(reason="auto_recovery_recon")
+                            if self._startup_barrier():
+                                self._recovery_attempts = 0
+                        continue
+                    if self.lifecycle.state == LifecycleState.RECOVERY:
+                        self.lifecycle.complete_recovery_to_reconciling(reason="recovery_progress")
+                        time.sleep(self.s.loop_interval_sec)
+                        continue
+                    time.sleep(self.s.loop_interval_sec)
+                    continue
+                self._hb("READY")
+                if self.s.telegram_kill_command:
+                    try:
+                        self.notify.poll_kill_command(self.state_dir / "KILL")
+                    except Exception:
+                        pass
+                if self.risk.kill_switch_active():
+                    self.lifecycle.transition(LifecycleState.KILL, reason="kill_switch")
+                    self.metrics.set_status("KILL")
+                    self._hb("KILL")
+                    self.notify.send("TKO: kill switch ACTIVE - not trading")
+                    time.sleep(self.s.loop_interval_sec)
+                    continue
+                if self.client.circuit_open:
+                    self.lifecycle.transition(LifecycleState.DEGRADED, reason=f"circuit:{self.client.circuit_reason}")
+                    self.metrics.set_status("ERROR", "circuit_open")
+                    self._hb("DEGRADED")
+                    time.sleep(self.s.loop_interval_sec)
+                    continue
+                try:
+                    breach = self.risk.check_daily_limits_or_kill()
+                    if breach:
+                        self.lifecycle.transition(LifecycleState.KILL, reason=breach)
+                        self.metrics.set_status("KILL", breach)
+                        self._hb("KILL")
+                        time.sleep(self.s.loop_interval_sec)
+                        continue
+                    self._tick()
+                    self.lifecycle.mark_tick()
+                    self.metrics.set_status("OK")
+                except Exception as exc:
+                    logger.exception("tick failed: %s", exc)
+                    self.audit.record("ERROR", reason=f"tick:{exc}")
+                    self.metrics.set_status("ERROR", str(exc)[:200])
+                    self.lifecycle.transition(LifecycleState.DEGRADED, reason=f"tick:{exc}")
+                    self._hb("DEGRADED")
+                time.sleep(self.s.loop_interval_sec)
+        finally:
+            if self.lifecycle.state not in (LifecycleState.STOPPED, LifecycleState.STOPPING):
+                self.stop()
+
+    def _clear_start_active(self) -> None:
+        with self._start_lock:
+            self._start_active = False
+
+    def request_shutdown(self) -> None:
+        self._stop_requested = True
+        self._running = False
+        self.lifecycle.request_stop()
+
+    def stop(self) -> None:
+        self._stop_requested = True
+        self._running = False
+        if self.lifecycle.state == LifecycleState.STOPPED:
+            self._clear_start_active()
+            return
+        self.lifecycle.request_stop()
+        if self.lifecycle.state != LifecycleState.STOPPING:
+            self.lifecycle.force(LifecycleState.STOPPING, reason="shutdown_requested")
+        self.lifecycle.mark_process_stopped()
+        self._hb("STOPPING")
+        self.audit.record("DECISION", reason="runtime_stopping")
+        try:
+            self.client.close()
+        except Exception as exc:
+            logger.warning("client close: %s", exc)
+        self.lifecycle.force(LifecycleState.STOPPED, reason="shutdown_complete")
+        self._hb("STOPPED")
+        self.metrics.set_status("STOPPED")
+        self.audit.record("DECISION", reason="runtime_stopped")
+        self._stop_ipc()
+        self._clear_start_active()
+        logger.info("event=runtime_stopped")
+
+    def _tick(self) -> None:
+        if not self.lifecycle.trading_authorized:
+            return
+        balances = self.client.fetch_balance()
+        self.lifecycle.mark_exchange_contact()
+        free_map = {a: b.free for a, b in balances.items() if b.free > 0}
+        logger.info("balances free=%s", {k: round(v, 8) for k, v in sorted(free_map.items())})
+        if self._manage_positions(free_map):
+            return
+        self._try_buy_primary(free_map)
+
+    def _manage_positions(self, free_map: dict[str, float]) -> bool:
+        if not self.lifecycle.trading_authorized:
+            return False
+        bases = self.s.tradeable_base_list()
+        quotes = self.s.quote_asset_list()
+        acted = False
+        for base in bases:
+            free_base = free_map.get(base, 0.0)
+            if free_base <= self.s.min_base_dust:
+                continue
+            if base in STABLE_LIKE and base != self.s.base_asset.upper():
+                continue
+            symbol = None
+            quote_used = None
+            for q in quotes:
+                symbol = self.client.resolve_symbol(base, q)
+                if symbol:
+                    quote_used = q
+                    break
+            if not symbol or not quote_used:
+                continue
+            try:
+                ticker = self.client.fetch_ticker(symbol)
+                last = float(ticker.last or 0)
+            except Exception as exc:
+                logger.warning("ticker failed %s: %s", symbol, exc)
+                continue
+            if last <= 0:
+                continue
+            entry = self.execution.load_entry_price(symbol) or last
+            decision = self.risk.evaluate_exit(
+                symbol=symbol, base_free=free_base, last_price=last, entry_price=entry
+            )
+            if decision.approved and decision.size_base > 0:
+                if not self.lifecycle.trading_authorized:
+                    return acted
+                result = self.execution.sell(symbol, decision, last, base=base, quote=quote_used)
+                if result:
+                    acted = True
+                    self.notify.send(f"SELL {symbol} filled={result.filled} avg={result.average}")
+        return acted
+
+    def _try_buy_primary(self, free_map: dict[str, float]) -> None:
+        if not self.lifecycle.trading_authorized:
+            return
+        base = self.s.base_asset.upper()
+        quotes = self.s.quote_asset_list()
+        for quote in quotes:
+            free_q = free_map.get(quote, 0.0)
+            if free_q < self.s.min_quote_balance:
+                continue
+            symbol = self.client.resolve_symbol(base, quote)
+            if not symbol:
+                continue
+            try:
+                ohlcv = self.client.fetch_ohlcv(
+                    symbol,
+                    timeframe=self.s.ohlcv_timeframe,
+                    limit=self.s.ohlcv_limit,
+                )
+                ticker = self.client.fetch_ticker(symbol)
+                last = float(ticker.last or 0)
+            except Exception as exp:
+                logger.warning("market data failed %s: %s", symbol, exp)
+                continue
+            if last <= 0:
+                continue
+            if self.ohlcv_store is not None:
+                try:
+                    self.ohlcv_store.append(symbol, self.s.ohlcv_timeframe, ohlcv)
+                except Exception:
+                    pass
+            signal = self.strategy.analyze(ohlcv)
+            if self.ml_filter is not None and self.ml_filter.enabled:
+                try:
+                    signal = self.ml_filter.filter(signal, ohlcv)
+                except Exception as exp:
+                    logger.warning("ml filter failed: %s", exp)
+            open_n = len([p for p in self.positions_store.all() if p.amount > 0])
+            md_ts = None
+            try:
+                if getattr(ticker, "timestamp_ms", None):
+                    md_ts = float(ticker.timestamp_ms) / 1000.0
+            except (TypeError, ValueError):
+                md_ts = None
+            decision = self.risk.evaluate_entry(
+                symbol=symbol,
+                quote_free=free_q,
+                last_price=last,
+                signal=signal,
+                open_positions=open_n,
+                quote_asset=quote,
+                market_data_ts=md_ts,
+            )
+            if not decision.approved:
+                logger.info("entry blocked %s: %s", symbol, decision.reason)
+                continue
+            if not self.lifecycle.trading_authorized:
+                return
+            result = self.execution.buy(symbol, base, quote, decision, last)
+            if result:
+                self.notify.send(f"BUY {symbol} filled={result.filled} avg={result.average}")
+            return
