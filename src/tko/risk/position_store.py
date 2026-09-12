@@ -62,27 +62,71 @@ class PositionStore:
         self._lock = threading.RLock()
         self._positions: dict[str, StoredPosition] = {}
         self._applied_fill_ids: set[str] = set()
+        self.corrupted: bool = False
+        self.corruption_reason: str = ""
         self._load()
 
     def _load(self) -> None:
         if not self.path.exists():
             return
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            raw_text = self.path.read_text(encoding="utf-8")
+            if not raw_text.strip():
+                self.corrupted = True
+                self.corruption_reason = "position store empty"
+                self._positions = {}
+                self._applied_fill_ids = set()
+                logger.critical("event=position_store_corrupted reason=%s", self.corruption_reason)
+                return
+            raw = json.loads(raw_text)
             items = raw.get("positions") if isinstance(raw, dict) else raw
             if not isinstance(items, list):
+                self.corrupted = True
+                self.corruption_reason = "positions not a list"
+                self._positions = {}
+                self._applied_fill_ids = set()
+                logger.critical("event=position_store_corrupted reason=%s", self.corruption_reason)
                 return
+            loaded = {}
             for item in items:
                 if not isinstance(item, dict):
-                    continue
+                    self.corrupted = True
+                    self.corruption_reason = "position non-dict"
+                    self._positions = {}
+                    self._applied_fill_ids = set()
+                    logger.critical("event=position_store_corrupted reason=%s", self.corruption_reason)
+                    return
                 pos = StoredPosition.from_dict(item)
-                if pos.amount > 0 and pos.symbol:
-                    self._positions[pos.symbol] = pos
-            applied = raw.get("applied_fill_ids") if isinstance(raw, dict) else None
-            if isinstance(applied, list):
-                self._applied_fill_ids = {str(x) for x in applied}
-        except Exception as exc:
-            logger.warning("Failed to load positions from %s: %s", self.path, exc)
+                if not pos.symbol:
+                    self.corrupted = True
+                    self.corruption_reason = "missing symbol"
+                    self._positions = {}
+                    self._applied_fill_ids = set()
+                    logger.critical("event=position_store_corrupted reason=%s", self.corruption_reason)
+                    return
+                if pos.amount > 0:
+                    loaded[pos.symbol] = pos
+            applied = raw.get("applied_fill_ids") if isinstance(raw, dict) else []
+            if applied is None:
+                applied = []
+            if not isinstance(applied, list):
+                self.corrupted = True
+                self.corruption_reason = "applied_fill_ids not list"
+                self._positions = {}
+                self._applied_fill_ids = set()
+                logger.critical("event=position_store_corrupted reason=%s", self.corruption_reason)
+                return
+            self._positions = loaded
+            self._applied_fill_ids = {str(x) for x in applied}
+            self.corrupted = False
+            self.corruption_reason = ""
+        except Exception as exp:
+            self.corrupted = True
+            self.corruption_reason = f"position load failed: {type(exp).__name__}: {exp}"
+            self._positions = {}
+            self._applied_fill_ids = set()
+            logger.critical("event=position_store_corrupted reason=%s", self.corruption_reason)
+
 
     def _save(self) -> None:
         payload = {
