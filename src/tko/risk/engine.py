@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
+import time
+
 import math
 
 import logging
@@ -12,6 +16,7 @@ from pathlib import Path
 from tko.core.config import Settings
 from tko.core.types import Signal
 from tko.risk.pnl_tracker import DailyPnLTracker
+from tko.risk.market_data import validate_market_data_freshness
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,9 @@ def _extract_buy_signal(signal: object | None) -> bool:
     if signal is None:
         return False
     if signal is Signal.BUY or signal == Signal.BUY:
+        return True
+    side = getattr(signal, "side", None)
+    if side is not None and str(getattr(side, "value", side)).upper() in ("BUY", "SIGNAL.BUY"):
         return True
     inner = getattr(signal, "signal", None)
     if inner is not None:
@@ -80,9 +88,63 @@ class RiskEngine:
             timezone_name=settings.risk_timezone,
         )
         self.audit = audit
-        self._equity_baseline = float(settings.daily_equity_baseline or 0.0)
         self._budget_lock = threading.RLock()
         self._reserved: dict[str, float] = {}
+        self._baseline_path = self.state_dir / "risk_day_baseline.json"
+        self.baseline_corrupted: bool = False
+        self.baseline_corruption_reason: str = ""
+        self._equity_baseline = 0.0
+        self._baseline_day = ""
+        self._load_or_init_baseline()
+
+    def _risk_day(self) -> str:
+        from tko.risk.pnl_tracker import _day_key
+        return _day_key(time.time(), self.s.risk_timezone)
+
+    def _load_or_init_baseline(self) -> None:
+        day = self._risk_day()
+        configured = float(self.s.daily_equity_baseline or 0.0)
+        if not self._baseline_path.exists():
+            self._equity_baseline = configured
+            self._baseline_day = day
+            if configured > 0:
+                self._persist_baseline()
+            return
+        try:
+            raw = json.loads(self._baseline_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("not object")
+            stored_day = str(raw.get("day") or "")
+            stored_base = float(raw.get("baseline") or 0.0)
+            if stored_base != stored_base or stored_base < 0 or not stored_day:
+                raise ValueError("invalid baseline")
+            if stored_day == day:
+                self._equity_baseline = stored_base
+                self._baseline_day = stored_day
+            else:
+                self._equity_baseline = configured if configured > 0 else stored_base
+                self._baseline_day = day
+                self._persist_baseline()
+        except Exception as exc:
+            self.baseline_corrupted = True
+            self.baseline_corruption_reason = f"baseline load failed: {exc}"
+            self._equity_baseline = 0.0
+            logger.critical("event=risk_baseline_corrupted reason=%s", self.baseline_corruption_reason)
+
+    def _persist_baseline(self) -> None:
+        payload = {"day": self._baseline_day, "baseline": float(self._equity_baseline)}
+        tmp = self._baseline_path.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, indent=2))
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass
+        tmp.replace(self._baseline_path)
+
+    def equity_baseline(self) -> float:
+        return float(self._equity_baseline)
 
     def reserved_notional(self) -> float:
         with self._budget_lock:
@@ -313,6 +375,10 @@ class RiskEngine:
         *,
         quote_asset: str | None = None,
     ) -> RiskDecision:
+        if getattr(self, "baseline_corrupted", False):
+            reason = f"risk baseline corrupted: {self.baseline_corruption_reason}"
+            self._risk_block(reason)
+            return RiskDecision(False, reason, 0.0, 0.0)
         if self.kill_switch_active():
             self._risk_block("kill switch active")
             return RiskDecision(False, "kill switch active", 0.0, 0.0)
@@ -390,12 +456,17 @@ class RiskEngine:
         signal: object = None,
         open_positions: int = 0,
         quote_asset: str | None = None,
+        market_data_ts: float | None = None,
     ) -> RiskDecision:
         """Sole production BUY authorization gate. Requires explicit BUY signal."""
         if signal is None:
             return RiskDecision(False, "entry requires BUY signal", 0.0, 0.0)
         if not _extract_buy_signal(signal):
             return RiskDecision(False, f"signal not BUY: {signal!r}", 0.0, 0.0)
+        max_age = float(getattr(self.s, "market_data_max_age_sec", 60.0) or 0.0)
+        fr = validate_market_data_freshness(timestamp=market_data_ts, max_age_sec=max_age)
+        if not fr.ok:
+            return RiskDecision(False, fr.reason, 0.0, 0.0)
         strength = getattr(signal, "strength", None)
         if strength is not None:
             if not _is_finite_number(strength) or float(strength) < 0:
