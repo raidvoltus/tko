@@ -11,9 +11,11 @@ belong exclusively in tko.runtime.entrypoint.
 
 from __future__ import annotations
 
+import multiprocessing
 import sys
 
 from tko.runtime.entrypoint import main
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     sys.exit(main())
