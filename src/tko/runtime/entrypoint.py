@@ -70,7 +70,7 @@ def cmd_run(_: argparse.Namespace) -> int:
     except SettingsError as exc:
         print(f"CONFIG ERROR (fail-closed): {exc}")
         return 1
-    except Exception as exp:
+    except Exception as exp:  # noqa: BLE001
         print(f"CONFIG ERROR (fail-closed): {exp}")
         return 1
 
@@ -105,7 +105,7 @@ def cmd_run(_: argparse.Namespace) -> int:
                     bot.request_shutdown()
                 elif hasattr(bot, "lifecycle") and hasattr(bot.lifecycle, "request_stop"):
                     bot.lifecycle.request_stop()
-            except Exception:
+            except Exception:  # noqa: BLE001,S110
                 pass
         raise SystemExit(0)
 
@@ -127,7 +127,7 @@ def cmd_run(_: argparse.Namespace) -> int:
         except SystemExit:
             try:
                 bot.stop()
-            except Exception:
+            except Exception:  # noqa: BLE001,S110
                 pass
             raise
         return 0
@@ -136,7 +136,7 @@ def cmd_run(_: argparse.Namespace) -> int:
         if bot is not None:
             try:
                 bot.stop()
-            except Exception:
+            except Exception:  # noqa: BLE001,S110
                 pass
         lock.release()
 
@@ -291,7 +291,6 @@ def main(argv: list[str] | None = None) -> int:
     p_install = sub.add_parser("install-service")
     p_install.add_argument("--task-name", default="TkoBot")
     p_install.add_argument("--force", action="store_true")
-    p_install.add_argument("--use_system", action="store_true")
     p_install.set_defaults(func=cmd_install_service)
 
     p_uninstall = sub.add_parser("uninstall-service")
