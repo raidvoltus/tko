@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import multiprocessing
 import logging
+import multiprocessing
 import signal
 import sys
 from getpass import getpass
@@ -70,8 +70,8 @@ def cmd_run(_: argparse.Namespace) -> int:
     except SettingsError as exc:
         print(f"CONFIG ERROR (fail-closed): {exc}")
         return 1
-    except Exception as exc:
-        print(f"CONFIG ERROR (fail-closed): {exc}")
+    except Exception as exp:
+        print(f"CONFIG ERROR (fail-closed): {exp}")
         return 1
 
     if settings.live_mode is not True:
@@ -248,9 +248,11 @@ def cmd_gui(_: argparse.Namespace) -> int:
 
 def cmd_version(_: argparse.Namespace) -> int:
     """Print version / build metadata (no secrets)."""
-    from tko import __version__
-    from tko.runtime.paths import is_frozen, app_root, data_root
     import platform
+
+    from tko import __version__
+    from tko.runtime.paths import app_root, data_root, is_frozen
+
     build = {
         "version": __version__,
         "commit": __import__("os").environ.get("TKO_BUILD_COMMIT", "unknown"),
