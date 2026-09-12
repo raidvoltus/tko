@@ -156,10 +156,10 @@ def recover_json_state(
     logger.warning("event=state_corrupt path=%s reason=%s", primary, reason)
     for z in list_backup_zips(backups_dir):
         tmp_out = primary.with_suffix(".recover_tmp")
-        success, msg = extract_file_from_backup(z, arcname, tmp_out)
+        success, _msg = extract_file_from_backup(z, arcname, tmp_out)
         if not success:
             continue
-        ok2, reason2, data2 = validate_json_file(tmp_out)
+        ok2, _reason2, data2 = validate_json_file(tmp_out)
         if ok2 and (structural_ok is None or structural_ok(data2)):
             try:
                 tmp_out.replace(primary)

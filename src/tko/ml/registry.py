@@ -146,7 +146,7 @@ class ModelRegistry:
             return None
         try:
             return json.loads(self.active_path.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     def clear_active(self) -> None:

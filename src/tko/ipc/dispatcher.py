@@ -53,7 +53,7 @@ def build_status(core: CoreHandle | None, *, started_at: float, worker_id: str) 
         }
     try:
         return {"ok": True, "state": core.status_dict()}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("status snapshot failed: %s", exc)
         return {"ok": False, "error": "status_unavailable"}
 
@@ -86,7 +86,7 @@ def dispatch(
 
             core.lifecycle.force(LifecycleState.KILL, reason="ipc_kill")
             core.request_shutdown()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "accepted": "kill"}
 

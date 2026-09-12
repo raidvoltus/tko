@@ -48,7 +48,7 @@ class MetricsStore:
             for k, v in data.items():
                 if hasattr(self._m, k):
                     setattr(self._m, k, v)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("metrics load failed: %s", exc)
 
     def _save(self) -> None:

@@ -39,7 +39,7 @@ class FillEvent:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "FillEvent":
+    def from_dict(cls, data: dict[str, Any]) -> FillEvent:
         return cls(
             event_id=str(data["event_id"]),
             client_order_id=str(data.get("client_order_id") or ""),
@@ -85,7 +85,7 @@ class FillJournal:
                         if isinstance(data, dict) and data.get("event_id"):
                             ev = FillEvent.from_dict(data)
                             self._events[ev.event_id] = ev
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("fill journal load failed: %s", exc)
         if self._applied_path.exists():
             try:
@@ -93,7 +93,7 @@ class FillJournal:
                 ids = raw.get("applied") if isinstance(raw, dict) else raw
                 if isinstance(ids, list):
                     self._applied = {str(x) for x in ids}
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("fill applied-set load failed: %s", exc)
 
     def _append_line(self, event: FillEvent) -> None:

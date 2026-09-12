@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +70,7 @@ class ChampionRegistry:
         try:
             d = json.loads(self.active_path.read_text(encoding="utf-8"))
             return ChampionRecord(**d)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     def clear(self) -> None:

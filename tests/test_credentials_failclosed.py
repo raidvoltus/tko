@@ -23,6 +23,5 @@ def test_legacy_file_raises(tmp_path: Path, monkeypatch):
 def test_missing_raises(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(cred, "_state_root", lambda: tmp_path)
     monkeypatch.setattr(cred, "_keyring_available", lambda: True)
-    with patch("keyring.get_password", return_value=None):
-        with pytest.raises(cred.CredentialNotFoundError):
-            cred.load_tokocrypto()
+    with patch("keyring.get_password", return_value=None), pytest.raises(cred.CredentialNotFoundError):
+        cred.load_tokocrypto()

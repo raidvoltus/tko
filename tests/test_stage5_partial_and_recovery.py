@@ -18,13 +18,13 @@ from tko.risk.pnl_tracker import DailyPnLTracker
 
 
 def _settings(**kwargs) -> Settings:
-    base = dict(
-        max_order_notional=5_000_000,
-        max_daily_notional=10_000_000,
-        max_position_pct=100,
-        min_quote_balance=1,
-        max_open_positions=10,
-    )
+    base = {
+        "max_order_notional": 5_000_000,
+        "max_daily_notional": 10_000_000,
+        "max_position_pct": 100,
+        "min_quote_balance": 1,
+        "max_open_positions": 10,
+    }
     base.update(kwargs)
     return Settings(**base)
 

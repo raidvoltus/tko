@@ -11,9 +11,9 @@ import pytest
 from tko.core.config import Settings
 from tko.risk.engine import RiskEngine
 from tko.risk.pnl_tracker import DailyPnLTracker
-from tko.runtime.lifecycle import LifecycleGovernor, LifecycleState
 from tko.runtime.instance_lock import InstanceLock, InstanceLockError
-from tko.runtime.watchdog import Watchdog, Heartbeat
+from tko.runtime.lifecycle import LifecycleGovernor, LifecycleState
+from tko.runtime.watchdog import Heartbeat, Watchdog
 
 
 def _to_ready(lc: LifecycleGovernor, reason: str = "test") -> None:

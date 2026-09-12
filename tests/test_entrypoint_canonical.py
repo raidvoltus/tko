@@ -16,7 +16,6 @@ def test_console_script_target_is_entrypoint_main():
 def test_dunder_main_delegates_to_entrypoint():
     """__main__.py must only re-export entrypoint.main — no parallel lifecycle."""
     import tko.__main__ as dunder
-
     from tko.runtime.entrypoint import main as entry_main
 
     assert dunder.main is entry_main

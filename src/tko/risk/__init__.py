@@ -1,5 +1,5 @@
 """Risk engine."""
 
-from tko.risk.engine import RiskEngine, RiskDecision
+from tko.risk.engine import RiskDecision, RiskEngine
 
-__all__ = ["RiskEngine", "RiskDecision"]
+__all__ = ["RiskDecision", "RiskEngine"]

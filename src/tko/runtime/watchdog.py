@@ -55,7 +55,7 @@ class Heartbeat:
             if not isinstance(data, dict):
                 return None
             return data
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("heartbeat read failed: %s", exc)
             return None
 

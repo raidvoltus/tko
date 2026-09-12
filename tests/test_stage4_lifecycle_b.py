@@ -27,10 +27,10 @@ def _to_ready(g, *, reason: str = "test_ready") -> None:
 
 
 def _gates(**over):
-    base = dict(
-        recon_ok=True, kill_switch_clear=True, circuit_clear=True,
-        daily_risk_ok=True, positions_ok=True, exchange_ok=True,
-    )
+    base = {
+        "recon_ok": True, "kill_switch_clear": True, "circuit_clear": True,
+        "daily_risk_ok": True, "positions_ok": True, "exchange_ok": True,
+    }
     base.update(over)
     return base
 

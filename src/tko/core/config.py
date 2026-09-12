@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     @classmethod
     def _finite_float(cls, v: float) -> float:
         if not isinstance(v, (int, float)) or isinstance(v, bool):
-            raise ValueError("must be a real number")
+            raise TypeError("must be a real number")
         fv = float(v)
         if not math.isfinite(fv):
             raise ValueError("must be finite (not NaN/inf)")

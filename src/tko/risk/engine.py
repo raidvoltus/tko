@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 import json
-import os
-import time
-
-import math
-
 import logging
+import math
+import os
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from tko.core.config import Settings
 from tko.core.types import Signal
-from tko.risk.pnl_tracker import DailyPnLTracker
 from tko.risk.market_data import validate_market_data_freshness
+from tko.risk.pnl_tracker import DailyPnLTracker
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +53,7 @@ def _extract_buy_signal(signal: object | None) -> bool:
     val = getattr(signal, "value", None)
     if val is not None and str(val).upper() == "BUY":
         return True
-    if str(signal).upper() in ("BUY", "SIGNAL.BUY"):
-        return True
-    return False
+    return str(signal).upper() in ("BUY", "SIGNAL.BUY")
 
 
 class RiskEngine:
@@ -113,10 +109,10 @@ class RiskEngine:
         try:
             raw = json.loads(self._baseline_path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
-                raise ValueError("not object")
+                raise TypeError("not object")
             stored_day = str(raw.get("day") or "")
             stored_base = float(raw.get("baseline") or 0.0)
-            if stored_base != stored_base or stored_base < 0 or not stored_day:
+            if not math.isfinite(stored_base) or stored_base < 0 or not stored_day:
                 raise ValueError("invalid baseline")
             if stored_day == day:
                 self._equity_baseline = stored_base
@@ -125,7 +121,7 @@ class RiskEngine:
                 self._equity_baseline = configured if configured > 0 else stored_base
                 self._baseline_day = day
                 self._persist_baseline()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self.baseline_corrupted = True
             self.baseline_corruption_reason = f"baseline load failed: {exc}"
             self._equity_baseline = 0.0
@@ -323,7 +319,7 @@ class RiskEngine:
         if self.audit is not None:
             try:
                 self.audit.record("RISK_BLOCK", reason=reason)  # type: ignore[attr-defined]
-            except Exception:
+            except Exception:  # noqa: BLE001,S110
                 pass
 
     def set_equity_baseline_if_empty(self, equity: float) -> None:
@@ -341,7 +337,7 @@ class RiskEngine:
         if self.audit is not None:
             try:
                 self.audit.record("KILL_SWITCH", reason=reason[:300])  # type: ignore[attr-defined]
-            except Exception:
+            except Exception:  # noqa: BLE001,S110
                 pass
 
     def clear_kill_switch(self) -> None:
@@ -468,9 +464,8 @@ class RiskEngine:
         if not fr.ok:
             return RiskDecision(False, fr.reason, 0.0, 0.0)
         strength = getattr(signal, "strength", None)
-        if strength is not None:
-            if not _is_finite_number(strength) or float(strength) < 0:
-                return RiskDecision(False, "invalid signal strength", 0.0, 0.0)
+        if strength is not None and (not _is_finite_number(strength) or float(strength) < 0):
+            return RiskDecision(False, "invalid signal strength", 0.0, 0.0)
         qa = quote_asset
         if qa is None and symbol and "/" in symbol:
             qa = symbol.split("/", 1)[1]

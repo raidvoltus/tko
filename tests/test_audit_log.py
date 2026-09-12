@@ -1,6 +1,7 @@
 """Audit log unit tests."""
 
 from pathlib import Path
+
 from tko.audit.audit_log import AuditLog
 
 

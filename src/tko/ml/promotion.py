@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from tko.ml.artifacts import load_and_verify_bundle
-from tko.ml.champion import ChampionRecord, ChampionRegistry
 from tko.ml.challenger import ChallengerRegistry
+from tko.ml.champion import ChampionRecord, ChampionRegistry
 
 
 class PromoState(str, Enum):
@@ -72,7 +72,7 @@ class PromotionLock:
                 cur = json.loads(self.path.read_text(encoding="utf-8"))
                 if cur.get("model_id") == model_id and cur.get("state") == "IN_PROGRESS":
                     return False
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return False
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(
@@ -86,7 +86,7 @@ class PromotionLock:
         if self.path.exists():
             try:
                 cur = json.loads(self.path.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 cur = {}
             cur["state"] = final
             cur["ts"] = time.time()
@@ -119,7 +119,7 @@ class PromotionEngine:
         if self.state_path.exists():
             try:
                 cur_raw = json.loads(self.state_path.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 self._write_state(model_id, PromoState.SAFE_FAIL, "corrupt_state")
                 return PromoState.SAFE_FAIL
         cur = PromoState(cur_raw["state"]) if cur_raw and cur_raw.get("model_id") == model_id else PromoState.TRAINED
@@ -145,8 +145,7 @@ class PromotionEngine:
             if chall is None:
                 return {"ok": False, "reason": "challenger_missing"}
             if chall.status not in ("PROMOTION_ELIGIBLE", "CHALLENGER_VALIDATED", "SHADOW_ACTIVE"):
-                if chall.status != "PROMOTION_ELIGIBLE":
-                    return {"ok": False, "reason": f"status_not_eligible:{chall.status}"}
+                return {"ok": False, "reason": f"status_not_eligible:{chall.status}"}
             ok, reason = load_and_verify_bundle(Path(chall.artifact_dir)) if chall.artifact_dir else (False, "no_artifact")
             if chall.artifact_dir and not ok:
                 self.challengers.update_status(model_id, "REJECTED")
@@ -174,7 +173,7 @@ class PromotionEngine:
             self.challengers.update_status(model_id, "PROMOTED")
             self.lock.release(final="PROMOTED")
             return {"ok": True, "champion": champ.to_dict()}
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self.transition(model_id, PromoState.SAFE_FAIL, reason=str(exc))
             self.lock.release(final="SAFE_FAIL")
             return {"ok": False, "reason": f"exception:{exc}"}

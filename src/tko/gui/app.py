@@ -111,9 +111,8 @@ class TKOControlApp:
         self.vars["Authorized"].set("UNKNOWN")
 
     def _send(self, cmd: str) -> None:
-        if cmd in ("stop", "kill"):
-            if not messagebox.askyesno("Confirm", f"Send {cmd.upper()} to Core?"):
-                return
+        if cmd in ("stop", "kill") and not messagebox.askyesno("Confirm", f"Send {cmd.upper()} to Core?"):
+            return
 
         def worker() -> None:
             r = self.client.request(cmd)
@@ -129,7 +128,7 @@ class TKOControlApp:
         # GUI exit must NOT stop Core
         try:
             self.client.disconnect()
-        except Exception:
+        except Exception:  # noqa: BLE001,S110
             pass
         self.root.destroy()
 

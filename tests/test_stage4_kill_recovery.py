@@ -7,14 +7,14 @@ from tko.runtime.lifecycle import LifecycleGovernor, LifecycleState
 
 def _gates(**over):
     """All validation gates True unless overridden."""
-    base = dict(
-        recon_ok=True,
-        kill_switch_clear=True,
-        circuit_clear=True,
-        daily_risk_ok=True,
-        positions_ok=True,
-        exchange_ok=True,
-    )
+    base = {
+        "recon_ok": True,
+        "kill_switch_clear": True,
+        "circuit_clear": True,
+        "daily_risk_ok": True,
+        "positions_ok": True,
+        "exchange_ok": True,
+    }
     base.update(over)
     return base
 

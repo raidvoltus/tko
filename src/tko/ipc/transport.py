@@ -10,7 +10,7 @@ import socket
 import struct
 import threading
 import time
-from typing import Callable
+from collections.abc import Callable
 
 from tko.ipc.protocol import (
     MAX_FRAME,
@@ -89,7 +89,7 @@ class IPCServer:
         while not self._stop.is_set():
             try:
                 conn, _ = srv.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 if self._stop.is_set():
@@ -97,7 +97,7 @@ class IPCServer:
                 continue
             try:
                 self._handle_client(conn)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("event=ipc_client_error err=%s", exc)
             finally:
                 try:
@@ -133,7 +133,7 @@ class IPCServer:
                 )
                 win32pipe.ConnectNamedPipe(pipe, None)
                 self._handle_named_pipe_client(pipe)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 if not self._stop.is_set():
                     logger.warning("event=ipc_pipe_error err=%s", exc)
                     time.sleep(0.3)
@@ -141,17 +141,17 @@ class IPCServer:
                 if pipe is not None:
                     try:
                         win32pipe.DisconnectNamedPipe(pipe)
-                    except Exception:
+                    except Exception:  # noqa: BLE001,S110
                         pass
                     try:
                         win32file.CloseHandle(pipe)
-                    except Exception:
+                    except Exception:  # noqa: BLE001,S110
                         pass
 
     def _auth_hello(self, body: bytes) -> bool:
         try:
             msg = json.loads(body.decode("utf-8"))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
         if not _hmac.compare_digest(str(msg.get("hello", "")).encode(), self._token):
             logger.warning("event=ipc_auth_failed")
@@ -168,11 +168,11 @@ class IPCServer:
         while not self._stop.is_set():
             try:
                 cmd_msg = unpack(recv_frame(conn), self._token)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return
             try:
                 reply = self.dispatcher(cmd_msg.get("cmd", ""), cmd_msg.get("args") or {})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 reply = {"ok": False, "error": str(exc)}
             try:
                 conn.sendall(pack(reply, self._token))
@@ -202,15 +202,15 @@ class IPCServer:
                 hdr = read_exact(8)
                 blen, slen = split_header(hdr)
                 cmd_msg = unpack(hdr + read_exact(blen + slen), self._token)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return
             try:
                 reply = self.dispatcher(cmd_msg.get("cmd", ""), cmd_msg.get("args") or {})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 reply = {"ok": False, "error": str(exc)}
             try:
                 win32file.WriteFile(pipe, pack(reply, self._token))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return
 
 
@@ -274,7 +274,7 @@ class IPCClient:
                 win32pipe.SetNamedPipeHandleState(h, win32pipe.PIPE_READMODE_MESSAGE, None, None)
                 self._sock = h
                 return self._handshake_pipe(h)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 time.sleep(0.1)
         self.last_error = "core offline"
         self.connected = False
@@ -329,7 +329,7 @@ class IPCClient:
                 assert isinstance(self._sock, socket.socket)
                 self._sock.sendall(frame)
                 return unpack(recv_frame(self._sock), self._token)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 self.connected = False
                 self.last_error = f"core offline: {exc}"
                 return {"ok": False, "error": self.last_error}
@@ -343,7 +343,7 @@ class IPCClient:
                     import win32file  # type: ignore
 
                     win32file.CloseHandle(self._sock)
-                except Exception:
+                except Exception:  # noqa: BLE001,S110
                     pass
         except OSError:
             pass

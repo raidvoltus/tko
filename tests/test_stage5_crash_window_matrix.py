@@ -132,12 +132,11 @@ def test_D_pnl_write_failure_leaves_unapplied(tmp_path: Path):
     eng.risk.try_reserve_notional(1_000_000, reservation_id=intent.client_order_id)
     event_id = make_event_id(intent.client_order_id, 0.4)
 
-    with patch.object(eng.risk.pnl, "record_trade", side_effect=OSError("disk full")):
-        with pytest.raises(OSError):
-            eng._on_fill_confirmed(
-                intent, Side.BUY, _buy_result(0.4, 0.6), base="BTC", quote="IDR",
-                partial=True, remaining=0.6,
-            )
+    with patch.object(eng.risk.pnl, "record_trade", side_effect=OSError("disk full")), pytest.raises(OSError):
+        eng._on_fill_confirmed(
+            intent, Side.BUY, _buy_result(0.4, 0.6), base="BTC", quote="IDR",
+            partial=True, remaining=0.6,
+        )
     assert eng.fill_journal.has_event(event_id)
     assert eng.fill_journal.is_applied(event_id) is False
 

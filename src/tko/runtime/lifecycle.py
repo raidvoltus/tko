@@ -14,9 +14,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -184,9 +185,8 @@ class LifecycleGovernor:
             self._reason = reason[:300]
             if target == LifecycleState.KILL:
                 self._kill_sticky = True
-            if target in (LifecycleState.HALTED, LifecycleState.DEGRADED, LifecycleState.KILL):
-                if reason:
-                    self._last_error = reason[:500]
+            if target in (LifecycleState.HALTED, LifecycleState.DEGRADED, LifecycleState.KILL) and reason:
+                self._last_error = reason[:500]
             logger.info(
                 "event=runtime_%s from=%s reason=%s",
                 target.value.lower(),
@@ -318,17 +318,16 @@ class LifecycleGovernor:
             return True
 
     def request_stop(self) -> None:
-        with self._submit_mutex:
-            with self._lock:
-                if self._state in (LifecycleState.STOPPED, LifecycleState.STOPPING):
-                    return
-                prev = self._state
-                self._state = LifecycleState.STOPPING
-                self._reason = "shutdown_requested"
-                logger.info(
-                    "event=runtime_stopping from=%s reason=shutdown_requested",
-                    prev.value,
-                )
+        with self._submit_mutex, self._lock:
+            if self._state in (LifecycleState.STOPPED, LifecycleState.STOPPING):
+                return
+            prev = self._state
+            self._state = LifecycleState.STOPPING
+            self._reason = "shutdown_requested"
+            logger.info(
+                "event=runtime_stopping from=%s reason=shutdown_requested",
+                prev.value,
+            )
 
     def run_authorized_submit(self, submit_fn: Callable[[], T]) -> T:
         with self._submit_mutex:

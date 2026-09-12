@@ -56,7 +56,7 @@ class MarketConstraints:
     def normalize_quantity(self, qty: Decimal | float | str, *, market_order: bool = True) -> Decimal:
         q = qty if isinstance(qty, Decimal) else Decimal(str(qty))
         if q <= 0:
-            return Decimal("0")
+            return Decimal(0)
         step = self.get_step_size(market_order=market_order)
         if step is None or step <= 0:
             prec = self.amount_precision

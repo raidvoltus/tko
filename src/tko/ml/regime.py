@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,8 +82,10 @@ def regime_not_extreme_degraded(
         m = ml_by_regime.get(name)
         if not m or m.get("n", 0) < min_trades:
             continue
-        if m["mean_pnl"] + 1e-12 < b["mean_pnl"] + max_mean_underperformance:
-            # allow mild underperformance; extreme = much worse
-            if m["mean_pnl"] < b["mean_pnl"] - abs(b["mean_pnl"]) - 1e-6:
-                return False
+        # mild underperformance allowed; extreme degradation rejects
+        if (
+            m["mean_pnl"] + 1e-12 < b["mean_pnl"] + max_mean_underperformance
+            and m["mean_pnl"] < b["mean_pnl"] - abs(b["mean_pnl"]) - 1e-6
+        ):
+            return False
     return True

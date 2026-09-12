@@ -9,7 +9,7 @@ from typing import Any
 import ccxt  # type: ignore
 
 from tko.core.credentials import TokocryptoCredentials
-from tko.core.types import Balance, OHLCV, OrderResult, OrderType, Side, Ticker
+from tko.core.types import OHLCV, Balance, OrderResult, OrderType, Side, Ticker
 from tko.exchange.constraints import MarketConstraints, extract_market_constraints
 from tko.exchange.order_response import InvalidOrderResponse, OrderLookupResult, validate_order_payload
 from tko.execution.errors import ErrorCategory, classify_exception, is_ambiguous
@@ -74,7 +74,7 @@ class TokocryptoClient:
         for sym, m in (self._client.markets or {}).items():
             try:
                 self._constraints_cache[sym] = extract_market_constraints(m)
-            except Exception as exp:
+            except Exception as exp:  # noqa: BLE001
                 logger.warning("constraints parse failed for %s: %s", sym, exp)
         logger.info("event=market_constraints_loaded markets=%d recvWindow=%d timeout_ms=%d mode=LIVE",
                     len(self._client.markets or {}), DEFAULT_RECV_WINDOW, self._timeout_ms)
@@ -83,7 +83,7 @@ class TokocryptoClient:
         if self._client is not None:
             try:
                 self._client.close()
-            except Exception:
+            except Exception:  # noqa: BLE001,S110
                 pass
             self._client = None
 
@@ -193,7 +193,7 @@ class TokocryptoClient:
 
     def find_order_by_client_id(
         self, symbol: str, client_order_id: str, *, lookback_limit: int = 50
-    ) -> "OrderLookupResult":
+    ) -> OrderLookupResult:
         """Lookup by client id with explicit FOUND / NOT_FOUND / QUERY_FAILED (INV-18).
 
         Never collapses total query failure into NOT_FOUND.
@@ -212,7 +212,7 @@ class TokocryptoClient:
                 for o in orders or []:
                     if self._match_client_id(o, client_order_id):
                         return OrderLookupResult.found(o)
-            except Exception as exp:
+            except Exception as exp:  # noqa: BLE001
                 errors.append(f"{fetcher_name}: {exp}")
                 logger.warning("%s during recon: %s", fetcher_name, exp)
 
@@ -246,7 +246,7 @@ class TokocryptoClient:
         self.connect()
         try:
             return int(self._client.fetch_time())
-        except Exception:
+        except Exception:  # noqa: BLE001
             return int(time.time() * 1000)
 
     def validate_symbol_ready(self, symbol: str) -> tuple[bool, str]:

@@ -20,7 +20,7 @@ def make_status_dict(bot: Any) -> dict:
             data = store.all()
             if isinstance(data, dict):
                 positions = {str(k): str(v) for k, v in data.items()}
-    except Exception:
+    except Exception:  # noqa: BLE001
         positions = {}
     pnl: dict = {}
     try:
@@ -30,7 +30,7 @@ def make_status_dict(bot: Any) -> dict:
             "notional": float(getattr(day, "notional_traded", 0.0) or 0.0),
             "day": str(getattr(day, "day", "")),
         }
-    except Exception:
+    except Exception:  # noqa: BLE001
         pnl = {}
     return {
         "lifecycle": snap.state.value,
@@ -66,7 +66,7 @@ def start_ipc(bot: Any) -> None:
         bot._ipc = IPCServer(_disp)
         bot._ipc.start()
         logger.info("event=ipc_bound worker_id=%s", bot._worker_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("event=ipc_start_failed err=%s", exc)
         bot._ipc = None
 
@@ -76,6 +76,6 @@ def stop_ipc(bot: Any) -> None:
     if ipc is not None:
         try:
             ipc.stop()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("event=ipc_stop_failed err=%s", exc)
         bot._ipc = None

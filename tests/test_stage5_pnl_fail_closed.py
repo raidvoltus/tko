@@ -68,12 +68,14 @@ def test_pnl_oserror_does_not_mark_applied(tmp_path: Path):
     def boom_record(*args, **kwargs):
         raise OSError("simulated disk full")
 
-    with patch.object(eng.risk.pnl, "record_trade", side_effect=boom_record):
-        with pytest.raises(OSError, match="simulated disk full"):
-            eng._on_fill_confirmed(
-                intent, Side.BUY, res, base="BTC", quote="IDR",
-                partial=True, remaining=0.6,
-            )
+    with (
+        patch.object(eng.risk.pnl, "record_trade", side_effect=boom_record),
+        pytest.raises(OSError, match="simulated disk full"),
+    ):
+        eng._on_fill_confirmed(
+            intent, Side.BUY, res, base="BTC", quote="IDR",
+            partial=True, remaining=0.6,
+        )
 
     # Journal barrier recorded; must NOT be applied
     assert eng.fill_journal.has_event(event_id)
@@ -102,8 +104,7 @@ def test_record_trade_raises_on_append_failure(tmp_path: Path):
             raise OSError("no space")
         return original(self, *a, **kw)
 
-    with patch.object(Path, "open", fail_open):
-        with pytest.raises(OSError, match="no space"):
-            pnl.record_trade(side="buy", symbol="BTC/IDR", notional=100.0, fill_event_id="e1")
+    with patch.object(Path, "open", fail_open), pytest.raises(OSError, match="no space"):
+        pnl.record_trade(side="buy", symbol="BTC/IDR", notional=100.0, fill_event_id="e1")
     assert "e1" not in pnl._fill_event_ids
     assert pnl.today_notional() == 0.0
