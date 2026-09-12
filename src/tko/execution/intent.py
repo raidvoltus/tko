@@ -129,22 +129,54 @@ class IntentStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._items: dict[str, OrderIntent] = {}
+        self.corrupted: bool = False
+        self.corruption_reason: str = ""
         self._load()
 
     def _load(self) -> None:
         if not self.path.exists():
             return
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            raw_text = self.path.read_text(encoding="utf-8")
+            if not raw_text.strip():
+                self.corrupted = True
+                self.corruption_reason = "intent store file is empty"
+                self._items = {}
+                logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
+                return
+            raw = json.loads(raw_text)
             items = raw.get("intents") if isinstance(raw, dict) else raw
             if not isinstance(items, list):
+                self.corrupted = True
+                self.corruption_reason = "intent store schema invalid"
+                self._items = {}
+                logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
                 return
+            loaded: dict = {}
             for item in items:
-                if isinstance(item, dict):
-                    intent = OrderIntent.from_dict(item)
-                    self._items[intent.client_order_id] = intent
+                if not isinstance(item, dict):
+                    self.corrupted = True
+                    self.corruption_reason = "intent non-dict entry"
+                    self._items = {}
+                    logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
+                    return
+                intent = OrderIntent.from_dict(item)
+                if not intent.client_order_id:
+                    self.corrupted = True
+                    self.corruption_reason = "missing client_order_id"
+                    self._items = {}
+                    logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
+                    return
+                loaded[intent.client_order_id] = intent
+            self._items = loaded
+            self.corrupted = False
+            self.corruption_reason = ""
         except Exception as exc:
-            logger.warning("intent load failed: %s", exc)
+            self.corrupted = True
+            self.corruption_reason = f"intent load failed: {type(exc).__name__}: {exc}"
+            self._items = {}
+            logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
+
 
     def _save(self) -> None:
         """Atomic replace with best-effort fsync (S5-W1 durability)."""
@@ -203,6 +235,9 @@ class IntentStore:
     ) -> OrderIntent | None:
         """Atomic check+create under lock. None if blocking intent exists (INV-19)."""
         with self._lock:
+            if self.corrupted:
+                logger.critical("event=intent_create_blocked reason=store_corrupted")
+                return None
             for intent in self._items.values():
                 if (
                     intent.symbol == symbol
