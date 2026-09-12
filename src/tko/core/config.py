@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import math
-import os
-from pathlib import Path
-from typing import Any
+from typing import Self
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class SettingsError(Exception):
-    """Fail-closed configuration error."""
+class SettingsError(ValueError):
+    """Invalid or unsafe configuration — fail closed before trading."""
 
 
 class Settings(BaseSettings):
+    """LIVE trading settings. Validated on load; unsafe values raise SettingsError."""
+
     model_config = SettingsConfigDict(
         env_prefix="TKO_",
         env_file=".env",
@@ -24,58 +24,153 @@ class Settings(BaseSettings):
     )
 
     live_mode: bool = True
+
     exchange_id: str = "tokocrypto"
-    symbol: str = "BTC/IDR"
-    quote_asset: str = "IDR"
+    account_id: str = "default"
     base_asset: str = "BTC"
+    quote_asset: str = "IDR"
+    quote_assets: str = "IDR,USDT,USDC"
+    tradeable_bases: str = "BTC,ETH,BNB,SOL,XRP,ADA,DOGE,MATIC,AVAX,DOT,LINK,TRX"
+    min_base_dust: float = Field(default=1e-8, gt=0, le=1.0)
 
-    max_daily_loss_pct: float = Field(default=2.0, gt=0)
-    max_order_notional: float = Field(default=5_000_000.0, gt=0)
-    max_daily_notional: float = Field(default=50_000_000.0, gt=0)
-    max_open_positions: int = Field(default=3, ge=0)
-    min_quote_balance: float = Field(default=100_000.0, ge=0)
+    loop_interval_sec: float = Field(default=60.0, ge=5.0, le=3600.0)
+    min_quote_balance: float = Field(default=50_000.0, gt=0)
+    min_quote_balance_usdt: float = Field(default=5.0, gt=0)
+    max_position_pct: float = Field(default=15.0, gt=0, le=100.0)
+    take_profit_pct: float = Field(default=1.5, gt=0, le=100.0)
+    stop_loss_pct: float = Field(default=2.0, gt=0, le=100.0)
+    rsi_period: int = Field(default=14, ge=2, le=200)
+    rsi_oversold: float = Field(default=35.0, ge=0.0, le=100.0)
+    rsi_overbought: float = Field(default=70.0, ge=0.0, le=100.0)
+    ema_fast: int = Field(default=9, ge=1, le=500)
+    ema_slow: int = Field(default=21, ge=2, le=500)
+    ohlcv_timeframe: str = "15m"
+    ohlcv_limit: int = Field(default=100, ge=20, le=1000)
+    ml_filter_enabled: bool = False
+    ml_min_confidence: float = Field(default=0.55, ge=0.5, le=0.99)
+    ml_model_path: str = ""
+    ohlcv_store_enabled: bool = True
+    ml_governor_enabled: bool = False
+    ml_profile: str = "ULTRA_LITE"
+    ml_pool_max_models: int = Field(default=5, ge=1, le=7)
+    ml_n_jobs: int = Field(default=1, ge=1, le=1)
+    ml_max_trees: int = Field(default=40, ge=1, le=50)
+    ml_max_depth: int = Field(default=4, ge=1, le=4)
+    ml_max_training_rows: int = Field(default=3000, ge=100, le=5000)
+    ml_safe_exit_on_pressure: bool = True
+    ml_diversity_min_pairwise: float = Field(default=0.15, ge=0.0, le=1.0)
+    max_open_positions: int = Field(default=3, ge=1, le=50)
+    max_order_notional: float = Field(default=2_000_000.0, gt=0)
+    max_daily_notional: float = Field(default=10_000_000.0, gt=0)
+    max_daily_loss_pct: float = Field(default=3.0, gt=0, le=100.0)
     equity_baseline: float = Field(default=0.0, ge=0)
-
-    market_data_max_age_sec: float = Field(default=30.0, ge=0)
-    heartbeat_stale_sec: float = Field(default=120.0, gt=0)
-    recv_window_ms: int = Field(default=5000, gt=0)
-
+    market_data_max_age_sec: float = Field(default=120.0, ge=0)
+    order_timeout_sec: float = Field(default=30.0, gt=0)
+    reconcile_interval_sec: float = Field(default=15.0, ge=1.0)
+    heartbeat_stale_sec: float = Field(default=180.0, gt=0)
     telegram_enabled: bool = False
     log_level: str = "INFO"
+    api_recv_window_ms: int = Field(default=5000, ge=1000, le=60000)
 
-    # ML secondary filter — defaults OFF (Stage 5.1 core sovereign)
-    ml_filter_enabled: bool = False
-    ml_governor_enabled: bool = False
-    ml_min_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
-
-    @field_validator("max_daily_loss_pct", "max_order_notional", "max_daily_notional", "min_quote_balance", "equity_baseline", "market_data_max_age_sec", "heartbeat_stale_sec", "ml_min_confidence", mode="before")
+    @field_validator(
+        "loop_interval_sec",
+        "min_quote_balance",
+        "min_quote_balance_usdt",
+        "max_position_pct",
+        "take_profit_pct",
+        "stop_loss_pct",
+        "rsi_oversold",
+        "rsi_overbought",
+        "ml_min_confidence",
+        "max_order_notional",
+        "max_daily_notional",
+        "max_daily_loss_pct",
+        "equity_baseline",
+        "market_data_max_age_sec",
+        "order_timeout_sec",
+        "reconcile_interval_sec",
+        "heartbeat_stale_sec",
+        "min_base_dust",
+        mode="before",
+    )
     @classmethod
     def _finite_float(cls, v: float) -> float:
         if not isinstance(v, (int, float)) or isinstance(v, bool):
             raise TypeError("must be a real number")
         fv = float(v)
         if not math.isfinite(fv):
-            raise ValueError("must be finite")
+            raise ValueError("must be finite (not NaN/inf)")
         return fv
 
-    def validate_for_live(self) -> None:
+    @model_validator(mode="after")
+    def _cross_field(self) -> Self:
+        if self.ema_fast >= self.ema_slow:
+            raise ValueError("ema_fast must be < ema_slow")
+        if self.rsi_oversold >= self.rsi_overbought:
+            raise ValueError("rsi_oversold must be < rsi_overbought")
         if self.live_mode is not True:
-            raise SettingsError("live_mode must be True")
-        if self.exchange_id.lower() != "tokocrypto":
-            raise SettingsError("exchange_id must be tokocrypto")
+            raise SettingsError(
+                "LIVE only: paper/demo/dry-run is not supported. "
+                "Unset TKO_LIVE_MODE or set TKO_LIVE_MODE=true."
+            )
+        return self
+
+    def validate_for_live(self) -> None:
+        try:
+            Settings.model_validate(self.model_dump())
+        except Exception as exc:  # noqa: BLE001
+            raise SettingsError(f"Invalid configuration: {exc}") from exc
+        if self.live_mode is not True:
+            raise SettingsError("LIVE gate failed: live_mode is not True")
+        if self.exchange_id != "tokocrypto":
+            raise SettingsError("LIVE gate failed: exchange_id must be tokocrypto")
+        if self.max_order_notional <= 0 or self.max_daily_notional <= 0:
+            raise SettingsError("LIVE gate failed: notional caps must be positive")
         if self.max_daily_loss_pct <= 0:
-            raise SettingsError("max_daily_loss_pct must be > 0")
-        if self.max_order_notional <= 0:
-            raise SettingsError("max_order_notional must be > 0")
-        if self.max_daily_notional <= 0:
-            raise SettingsError("max_daily_notional must be > 0")
+            raise SettingsError("LIVE gate failed: max_daily_loss_pct must be positive")
+        if self.loop_interval_sec < 5.0:
+            raise SettingsError("LIVE gate failed: loop_interval_sec too small")
+
+    def quote_asset_list(self) -> list[str]:
+        items = [x.strip().upper() for x in self.quote_assets.split(",") if x.strip()]
+        primary = self.quote_asset.upper()
+        ordered = [primary] + [a for a in items if a != primary]
+        seen: set[str] = set()
+        out: list[str] = []
+        for a in ordered:
+            if a not in seen:
+                seen.add(a)
+                out.append(a)
+        if not out:
+            raise SettingsError("quote_assets resolved to empty list")
+        return out
+
+    def tradeable_base_list(self) -> list[str]:
+        items = [x.strip().upper() for x in self.tradeable_bases.split(",") if x.strip()]
+        primary = self.base_asset.upper()
+        if primary not in items:
+            items.insert(0, primary)
+        seen: set[str] = set()
+        out: list[str] = []
+        for a in items:
+            if a not in seen:
+                seen.add(a)
+                out.append(a)
+        if not out:
+            raise SettingsError("tradeable_bases resolved to empty list")
+        return out
+
+    def min_balance_for_quote(self, quote: str) -> float:
+        q = quote.upper()
+        if q in ("USDT", "USDC", "BUSD", "USD"):
+            return float(self.min_quote_balance_usdt)
+        return float(self.min_quote_balance)
 
 
 def load_settings() -> Settings:
     try:
-        s = Settings()
+        settings = Settings()
     except Exception as exc:  # noqa: BLE001
-        raise SettingsError(str(exc)) from exc
-    if os.environ.get("TKO_LIVE_MODE", "true").lower() in ("0", "false", "no"):
-        raise SettingsError("TKO_LIVE_MODE disables live trading")
-    return s
+        raise SettingsError(f"Failed to load settings: {exc}") from exc
+    settings.validate_for_live()
+    return settings
