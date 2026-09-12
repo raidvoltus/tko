@@ -195,6 +195,15 @@ class TradingBot:
             return False
         daily_risk_ok = True
 
+        if getattr(self.execution.intents, "corrupted", False):
+            self._halt(f"intent_store_corrupted:{getattr(self.execution.intents, 'corruption_reason', '')[:200]}")
+            return False
+        if getattr(self.positions_store, "corrupted", False):
+            self._halt(f"position_store_corrupted:{getattr(self.positions_store, 'corruption_reason', '')[:200]}")
+            return False
+        if getattr(self.risk, "baseline_corrupted", False):
+            self._halt(f"risk_baseline_corrupted:{getattr(self.risk, 'baseline_corruption_reason', '')[:200]}")
+            return False
         if not self.lifecycle.authorize_ready(
             reason="startup_ok",
             recon_ok=recon_ok,
@@ -455,6 +464,12 @@ class TradingBot:
                 except Exception as exp:
                     logger.warning("ml filter failed: %s", exp)
             open_n = len([p for p in self.positions_store.all() if p.amount > 0])
+            md_ts = None
+            try:
+                if getattr(ticker, "timestamp_ms", None):
+                    md_ts = float(ticker.timestamp_ms) / 1000.0
+            except (TypeError, ValueError):
+                md_ts = None
             decision = self.risk.evaluate_entry(
                 symbol=symbol,
                 quote_free=free_q,
@@ -462,6 +477,7 @@ class TradingBot:
                 signal=signal,
                 open_positions=open_n,
                 quote_asset=quote,
+                market_data_ts=md_ts,
             )
             if not decision.approved:
                 logger.info("entry blocked %s: %s", symbol, decision.reason)
