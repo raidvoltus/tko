@@ -10,9 +10,11 @@ from pathlib import Path
 from tko.audit.audit_log import AuditLog
 from tko.core.config import Settings
 from tko.core.credentials import load_telegram, load_tokocrypto
-from tko.core.types import OrderType, Side, Signal
+from tko.core.types import Side
 from tko.exchange.tokocrypto import TokocryptoClient
 from tko.execution.engine import ExecutionEngine
+from tko.ml.filter import MlSignalFilter
+from tko.ml.ohlcv_store import OhlcvStore
 from tko.notify.telegram import TelegramNotifier
 from tko.reconciliation.reconciler import Reconciler
 from tko.risk.engine import RiskEngine
@@ -22,8 +24,6 @@ from tko.runtime.lifecycle import LifecycleGovernor, LifecycleState
 from tko.runtime.metrics import MetricsStore
 from tko.runtime.watchdog import Heartbeat
 from tko.strategy.btc import BtcAnalyzer
-from tko.ml.filter import MlSignalFilter
-from tko.ml.ohlcv_store import OhlcvStore
 
 logger = logging.getLogger(__name__)
 STABLE_LIKE = frozenset({"IDR", "USDT", "USDC", "BUSD", "USD", "BNB"})
@@ -112,7 +112,7 @@ class TradingBot:
         self.audit.record("ERROR", reason=f"runtime_halted:{reason[:200]}")
         try:
             self.notify.send(f"TKO HALTED: {reason[:300]}")
-        except Exception:
+        except Exception:  # noqa: BLE001,S110
             pass
         logger.critical("event=runtime_halted reason=%s", reason[:300])
 
@@ -123,7 +123,7 @@ class TradingBot:
         try:
             self.client.connect()
             self.lifecycle.mark_exchange_contact()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self._halt(f"exchange_connect_failed:{exc}")
             return False
         self.lifecycle.transition(LifecycleState.RECONCILING, reason="startup_recon")
@@ -160,7 +160,7 @@ class TradingBot:
                 )
                 return False
             self.lifecycle.mark_recon_ok()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self._halt(f"startup_reconciliation_failed:{exc}")
             return False
         recon_ok = True
@@ -190,7 +190,7 @@ class TradingBot:
             self.audit.record("ERROR", reason=f"daily_risk_block:{breach[:200]}")
             try:
                 self.notify.send(f"TKO KILL (pre-ready risk): {breach[:300]}")
-            except Exception:
+            except Exception:  # noqa: BLE001,S110
                 pass
             return False
         daily_risk_ok = True
@@ -220,7 +220,7 @@ class TradingBot:
         self.audit.record("DECISION", reason="runtime_ready", extra={"day": day.day})
         try:
             self.notify.send(f"TKO READY LIVE day={day.day} pnl={day.realized_pnl:.4f}")
-        except Exception:
+        except Exception:  # noqa: BLE001,S110
             pass
         logger.info("event=runtime_ready loop_interval=%.0fs", self.s.loop_interval_sec)
         return True
@@ -260,10 +260,12 @@ class TradingBot:
                         self.lifecycle.complete_recovery_to_reconciling(reason="startup_recovery_progress")
                     elif self.lifecycle.begin_recovery(reason=f"startup_recovery_{self._recovery_attempts}"):
                         self.lifecycle.complete_recovery_to_reconciling(reason="startup_recovery_recon")
-                    if self.lifecycle.state in (LifecycleState.RECONCILING, LifecycleState.STARTING):
-                        if self._startup_barrier():
-                            self._recovery_attempts = 0
-                            break
+                    if self.lifecycle.state in (
+                        LifecycleState.RECONCILING,
+                        LifecycleState.STARTING,
+                    ) and self._startup_barrier():
+                        self._recovery_attempts = 0
+                        break
                     continue
                 time.sleep(self.s.loop_interval_sec)
             else:
@@ -304,7 +306,7 @@ class TradingBot:
                 if self.s.telegram_kill_command:
                     try:
                         self.notify.poll_kill_command(self.state_dir / "KILL")
-                    except Exception:
+                    except Exception:  # noqa: BLE001,S110
                         pass
                 if self.risk.kill_switch_active():
                     self.lifecycle.transition(LifecycleState.KILL, reason="kill_switch")
@@ -331,7 +333,7 @@ class TradingBot:
                     self.lifecycle.mark_tick()
                     self.metrics.set_status("OK")
                 except Exception as exc:
-                    logger.exception("tick failed: %s", exc)
+                    logger.exception("tick failed")
                     self.audit.record("ERROR", reason=f"tick:{exc}")
                     self.metrics.set_status("ERROR", str(exc)[:200])
                     self.lifecycle.transition(LifecycleState.DEGRADED, reason=f"tick:{exc}")
@@ -364,7 +366,7 @@ class TradingBot:
         self.audit.record("DECISION", reason="runtime_stopping")
         try:
             self.client.close()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("client close: %s", exc)
         self.lifecycle.force(LifecycleState.STOPPED, reason="shutdown_complete")
         self._hb("STOPPED")
@@ -409,7 +411,7 @@ class TradingBot:
             try:
                 ticker = self.client.fetch_ticker(symbol)
                 last = float(ticker.last or 0)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("ticker failed %s: %s", symbol, exc)
                 continue
             if last <= 0:
@@ -447,7 +449,7 @@ class TradingBot:
                 )
                 ticker = self.client.fetch_ticker(symbol)
                 last = float(ticker.last or 0)
-            except Exception as exp:
+            except Exception as exp:  # noqa: BLE001
                 logger.warning("market data failed %s: %s", symbol, exp)
                 continue
             if last <= 0:
@@ -455,13 +457,13 @@ class TradingBot:
             if self.ohlcv_store is not None:
                 try:
                     self.ohlcv_store.append(symbol, self.s.ohlcv_timeframe, ohlcv)
-                except Exception:
+                except Exception:  # noqa: BLE001,S110
                     pass
             signal = self.strategy.analyze(ohlcv)
             if self.ml_filter is not None and self.ml_filter.enabled:
                 try:
                     signal = self.ml_filter.filter(signal, ohlcv)
-                except Exception as exp:
+                except Exception as exp:  # noqa: BLE001
                     logger.warning("ml filter failed: %s", exp)
             open_n = len([p for p in self.positions_store.all() if p.amount > 0])
             md_ts = None

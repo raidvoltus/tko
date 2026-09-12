@@ -66,11 +66,11 @@ class ExecutionEngine:
                 n = self.risk.rehydrate_reservations_from_intents(holding)
                 if n:
                     logger.info("event=startup_reservation_rehydrate count=%d", n)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("reservation rehydrate failed: %s", exc)
         try:
             self._replay_unapplied_fills()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("fill journal replay failed: %s", exc)
 
     def _hydrate_positions_memory(self) -> None:
@@ -184,7 +184,7 @@ class ExecutionEngine:
                     client_order_id=intent.client_order_id, reason=decision.reason,
                     quantity=float(quote_amt),
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001,S110
                 pass
         return self._submit(intent, side=Side.BUY, base_amount=0.0, quote_amount=float(quote_amt), base=base, quote=quote)
 
@@ -208,7 +208,7 @@ class ExecutionEngine:
             return None
         raw_qty = Decimal(str(decision.size_base)) * Decimal("0.999")
         norm = constraints.normalize_quantity(raw_qty, market_order=True)
-        ok_q, q_reason = constraints.validate_quantity(norm, market_order=True)
+        ok_q, _q_reason = constraints.validate_quantity(norm, market_order=True)
         if not ok_q:
             return None
         intent = self.intents.create_if_absent(
@@ -280,10 +280,10 @@ class ExecutionEngine:
             if self.metrics is not None:
                 try:
                     self.metrics.record_order(success=False)  # type: ignore[attr-defined]
-                except Exception:
+                except Exception:  # noqa: BLE001,S110
                     pass
             return None
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             intent.status = OrderIntentStatus.UNKNOWN
             intent.error_category = ErrorCategory.UNKNOWN_ERROR.value
             intent.error_message = str(exc)[:300]
@@ -315,7 +315,7 @@ class ExecutionEngine:
                         exchange_order_id=result.id, quantity=result.filled,
                         price=result.average, reason=f"remaining={remaining}",
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001,S110
                     pass
             self._on_fill_confirmed(
                 intent, side, result, base=base, quote=quote, partial=True, remaining=remaining
@@ -331,12 +331,12 @@ class ExecutionEngine:
                     client_order_id=intent.client_order_id or "",
                     exchange_order_id=result.id, quantity=result.filled, price=result.average,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001,S110
                 pass
         if self.metrics is not None:
             try:
                 self.metrics.record_order(success=True)  # type: ignore[attr-defined]
-            except Exception:
+            except Exception:  # noqa: BLE001,S110
                 pass
         self._on_fill_confirmed(intent, side, result, base=base, quote=quote, partial=False)
         return result

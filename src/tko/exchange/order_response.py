@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -34,7 +35,7 @@ def _finite(name: str, val: Any, *, required: bool = False, default: float | Non
         f = float(val)
     except (TypeError, ValueError) as exc:
         raise InvalidOrderResponse(f"invalid {name}") from exc
-    if f != f or f in (float("inf"), float("-inf")):
+    if not math.isfinite(f):
         raise InvalidOrderResponse(f"non-finite {name}")
     if f < 0:
         raise InvalidOrderResponse(f"negative {name}")
@@ -97,7 +98,7 @@ class OrderLookupStatus(str, Enum):
 class OrderLookupResult:
     """Typed result for find_order_by_client_id (INV-18)."""
 
-    __slots__ = ("status", "order", "error")
+    __slots__ = ("error", "order", "status")
 
     def __init__(
         self,
@@ -110,13 +111,13 @@ class OrderLookupResult:
         self.error = error
 
     @classmethod
-    def found(cls, order: dict) -> "OrderLookupResult":
+    def found(cls, order: dict) -> OrderLookupResult:
         return cls(OrderLookupStatus.FOUND, order=order)
 
     @classmethod
-    def not_found(cls) -> "OrderLookupResult":
+    def not_found(cls) -> OrderLookupResult:
         return cls(OrderLookupStatus.NOT_FOUND)
 
     @classmethod
-    def query_failed(cls, error: str) -> "OrderLookupResult":
+    def query_failed(cls, error: str) -> OrderLookupResult:
         return cls(OrderLookupStatus.QUERY_FAILED, error=error)

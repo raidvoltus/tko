@@ -5,8 +5,6 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-import pytest
-
 from tko.audit.audit_log import AuditLog
 from tko.core.redact import is_sensitive_key, redact_mapping, redact_text
 from tko.runtime.backup import (
@@ -148,7 +146,7 @@ def test_extract_rejects_corrupt_backup_json(tmp_path: Path):
     with zipfile.ZipFile(z, "w") as zf:
         zf.writestr("positions.json", "{truncated")
     dest = tmp_path / "out.json"
-    ok, msg = extract_file_from_backup(z, "positions.json", dest)
+    ok, _msg = extract_file_from_backup(z, "positions.json", dest)
     assert not ok
 
 
@@ -190,9 +188,9 @@ def test_recovery_cannot_bypass_risk_reservation(tmp_path: Path):
 
 
 def test_production_modules_not_placeholder():
+    import tko.runtime.backup as bak_mod
     import tko.runtime.bot as bot_mod
     import tko.runtime.lifecycle as lc_mod
-    import tko.runtime.backup as bak_mod
 
     for mod in (bot_mod, lc_mod, bak_mod):
         src = Path(mod.__file__).read_text(encoding="utf-8")

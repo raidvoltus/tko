@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any
 
 
 @dataclass
@@ -143,7 +144,7 @@ def evaluate_deployment_gates(
             f"baseline_pf={baseline_pf:.4f}",
         )
     )
-    freq_ok = ml_trades >= int(math.ceil(0.5 * max(0, baseline_trades)))
+    freq_ok = ml_trades >= math.ceil(0.5 * max(0, baseline_trades))
     gates.append(
         GateResult(
             "TRADE_FREQUENCY",

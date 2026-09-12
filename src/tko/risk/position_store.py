@@ -39,7 +39,7 @@ class StoredPosition:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "StoredPosition":
+    def from_dict(cls, data: dict[str, Any]) -> StoredPosition:
         return cls(
             symbol=str(data["symbol"]),
             base=str(data.get("base") or ""),
@@ -120,7 +120,7 @@ class PositionStore:
             self._applied_fill_ids = {str(x) for x in applied}
             self.corrupted = False
             self.corruption_reason = ""
-        except Exception as exp:
+        except Exception as exp:  # noqa: BLE001
             self.corrupted = True
             self.corruption_reason = f"position load failed: {type(exp).__name__}: {exp}"
             self._positions = {}

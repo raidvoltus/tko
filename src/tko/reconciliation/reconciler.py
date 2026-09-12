@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from tko.audit.audit_log import AuditLog
 from tko.exchange.order_response import (
@@ -65,7 +66,7 @@ class Reconciler:
         cid = intent.client_order_id or ""
         try:
             lookup = self.client.find_order_by_client_id(intent.symbol, cid)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             intent.error_category = "RECON_QUERY_FAILED"
             intent.error_message = str(exc)[:300]
             self.intents.update(intent)
@@ -200,7 +201,7 @@ class Reconciler:
             if filled_qty > 1e-12 and on_confirmed:
                 try:
                     on_confirmed(intent)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.warning("on_confirmed hook failed: %s", exc)
             return intent
 

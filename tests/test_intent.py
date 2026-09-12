@@ -1,5 +1,7 @@
 from pathlib import Path
+
 from tko.execution.intent import IntentStore, OrderIntentStatus, generate_client_order_id
+
 
 def test_client_id_stable_and_unique(tmp_path: Path):
     a = generate_client_order_id("buy", "BTC/IDR")

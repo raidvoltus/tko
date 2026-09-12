@@ -98,7 +98,7 @@ def load_and_verify_bundle(dest_dir: Path) -> tuple[bool, str]:
         return False, "missing_checksums"
     try:
         expected = json.loads(check_path.read_text(encoding="utf-8"))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return False, f"checksums_unreadable:{exc}"
     for name, digest in expected.items():
         p = dest_dir / name

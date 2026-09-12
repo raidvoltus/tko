@@ -30,7 +30,7 @@ class TelegramNotifier:
         if self._audit is not None:
             try:
                 self._audit.record("NOTIFY", reason=text[:200])  # type: ignore[attr-defined]
-            except Exception:
+            except Exception:  # noqa: BLE001,S110
                 pass
         token = self._creds.bot_token.get_secret_value()
         chat_id = self._creds.chat_id
@@ -60,7 +60,7 @@ class TelegramNotifier:
             req = urllib.request.Request(f"{url}?{qs}", method="GET")
             with urllib.request.urlopen(req, timeout=20) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug("telegram poll failed: %s", exc)
             return False
         if not body.get("ok"):
@@ -82,7 +82,7 @@ class TelegramNotifier:
                 if self._audit is not None:
                     try:
                         self._audit.record("KILL_SWITCH", reason="telegram_/kill")  # type: ignore[attr-defined]
-                    except Exception:
+                    except Exception:  # noqa: BLE001,S110
                         pass
                 killed = True
         return killed

@@ -91,7 +91,7 @@ class OrderIntent:
         return d
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "OrderIntent":
+    def from_dict(cls, data: dict[str, Any]) -> OrderIntent:
         st = data.get("status", "ORDER_INTENT_CREATED")
         try:
             status = OrderIntentStatus(st)
@@ -171,7 +171,7 @@ class IntentStore:
             self._items = loaded
             self.corrupted = False
             self.corruption_reason = ""
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self.corrupted = True
             self.corruption_reason = f"intent load failed: {type(exc).__name__}: {exc}"
             self._items = {}

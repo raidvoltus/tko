@@ -74,7 +74,7 @@ def _keyring_available() -> bool:
         import keyring  # noqa: F401
 
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -182,5 +182,5 @@ def load_telegram() -> TelegramCredentials | None:
         return creds
     except CredentialError:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None

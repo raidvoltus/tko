@@ -45,7 +45,7 @@ class MlSignalFilter:
         if self.enabled and self._model is None and self._model_path and self._model_path.exists():
             try:
                 self._model = load_model(self._model_path)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.error("event=ml_model_load_failed err=%s", exc)
                 self._model = None
 
@@ -82,7 +82,7 @@ class MlSignalFilter:
             if hasattr(self._model, "predict_proba"):
                 proba = self._model.predict_proba(x)[0]
                 conf = float(max(proba))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("event=ml_predict_failed err=%s", exc)
             if rule.signal == Signal.SELL:
                 return FilterDecision(True, rule.signal, 0, 0.0, "ml_predict_fail_allow_sell")

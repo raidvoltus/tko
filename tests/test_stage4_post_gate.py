@@ -7,8 +7,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from tko.core.config import Settings
-from tko.risk.engine import RiskDecision
 from tko.execution.engine import ExecutionEngine
+from tko.risk.engine import RiskDecision
 
 
 def test_live_create_order_requires_lifecycle_fail_closed(tmp_path: Path):
@@ -55,7 +55,7 @@ _SUSPECT_PATTERNS = [
     re.compile(r"requests\.post\s*\("),
     re.compile(r"httpx\.post\s*\("),
     re.compile(r"session\.post\s*\("),
-    re.compile(r"""\.request\s*\(\s*['\"]POST['\"]""", re.I),
+    re.compile(r"""\.request\s*\(\s*['\"]POST['\"]""", re.IGNORECASE),
     re.compile(r'["\']/api/v\d+/order'),
     re.compile(r'["\']/api/v\d+/orders'),
     re.compile(r"private_post_order"),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,7 +57,7 @@ def _finite(x: float) -> bool:
         v = float(x)
     except (TypeError, ValueError):
         return False
-    return v == v and abs(v) != float("inf")
+    return math.isfinite(v)
 
 
 def validate_ohlcv(
@@ -109,7 +110,7 @@ def validate_ohlcv(
             gap = ts - prev_ts
             if gap > step * 1.5:
                 # count missing intervals
-                report.missing_intervals += max(0, int(round(gap / step)) - 1)
+                report.missing_intervals += max(0, round(gap / step) - 1)
         prev_ts = ts
         clean.append(c)
 

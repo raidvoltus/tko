@@ -67,7 +67,7 @@ class AuditLog:
                 return "0" * 64
             row = json.loads(last)
             return str(row.get("hash") or "0" * 64)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return "0" * 64
 
     def record(

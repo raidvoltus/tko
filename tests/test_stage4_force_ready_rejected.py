@@ -81,7 +81,7 @@ def test_force_ready_rejected_from_every_non_ready_state():
         LifecycleState.DEGRADED: lambda g: g.force(LifecycleState.DEGRADED, reason="d"),
         LifecycleState.RECOVERY: lambda g: g.force(LifecycleState.RECOVERY, reason="r"),
     }
-    for st, place in placements.items():
+    for place in placements.values():
         g = LifecycleGovernor()
         place(g)
         before = g.state

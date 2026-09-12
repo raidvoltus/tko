@@ -7,20 +7,18 @@ from pathlib import Path
 import pytest
 
 from tko.core.config import Settings
-from tko.core.types import Signal
 from tko.ml.artifacts import publish_model_bundle
 from tko.ml.audit_ml import MlAuditLog
-from tko.ml.champion import ChampionRecord, ChampionRegistry
 from tko.ml.challenger import ChallengerRegistry
+from tko.ml.champion import ChampionRecord, ChampionRegistry
 from tko.ml.compare import compare_champion_challenger
 from tko.ml.drift import evaluate_drift
 from tko.ml.observation import ObservationConfig, ObservationWindow
-from tko.ml.paper import PaperConfig, PaperLedger, PaperMode, simulate_round_trip
+from tko.ml.paper import PaperLedger, PaperMode, simulate_round_trip
 from tko.ml.promotion import PromoState, PromotionEngine
 from tko.ml.shadow_engine import ShadowEngine, ShadowInput
 from tko.risk.engine import RiskEngine
 from tko.risk.pnl_tracker import DailyPnLTracker
-from tko.strategy.btc import TradeDecision
 
 
 def test_paper_isolated_from_production(tmp_path: Path):
@@ -228,6 +226,7 @@ def test_ml_cannot_authorize_or_execute(tmp_path: Path):
     with pytest.raises(RuntimeError, match="not a production authorization path"):
         risk.evaluate_buy(free_quote=1e6, last_price=1000, open_positions=0)
     import inspect
+
     from tko.ml import shadow_engine as se
     src = inspect.getsource(se)
     assert "create_order" not in src

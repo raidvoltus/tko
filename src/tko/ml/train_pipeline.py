@@ -6,19 +6,19 @@ Stage 5.1 core remains sovereign. This module never places orders.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from tko.core.types import OHLCV
-from tko.ml.artifacts import publish_model_bundle, sha256_bytes
+from tko.ml.artifacts import publish_model_bundle
 from tko.ml.calibration import PlattCalibrator, evaluate_calibration
 from tko.ml.cusum import CusumConfig, symmetric_cusum_events
-from tko.ml.data_quality import DataQualityReport, validate_ohlcv
+from tko.ml.data_quality import validate_ohlcv
 from tko.ml.features import build_feature_matrix
 from tko.ml.metrics_gates import (
     deflated_sharpe_ratio,
@@ -218,6 +218,7 @@ def run_training(
             try:
                 clf.fit(tr_x, tr_y)
             except Exception:
+                logger.exception("classifier fit failed for fold; skipping")
                 continue
             if hasattr(clf, "predict_proba"):
                 proba = clf.predict_proba(te_x)
@@ -329,12 +330,13 @@ def run_training(
     # Serialize via joblib if available else pickle
     model_bytes: bytes
     try:
-        import joblib
         import io
+
+        import joblib
         buf = io.BytesIO()
         joblib.dump({"model": final_clf, "calibrator": calibrator, "kind": best_kind}, buf)
         model_bytes = buf.getvalue()
-    except Exception:
+    except Exception:  # noqa: BLE001
         import pickle
         model_bytes = pickle.dumps({"model": final_clf, "calibrator": calibrator, "kind": best_kind})
 

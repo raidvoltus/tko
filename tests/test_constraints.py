@@ -1,5 +1,7 @@
 from decimal import Decimal
+
 from tko.exchange.constraints import extract_market_constraints
+
 
 def _sample_market(**overrides):
     m = {
@@ -29,14 +31,14 @@ def test_normalize_floors_never_rounds_up():
 def test_zero_after_normalization_rejected():
     c = extract_market_constraints(_sample_market())
     n = c.normalize_quantity(Decimal("0.00005"), market_order=True)
-    assert n == Decimal("0")
+    assert n == Decimal(0)
     ok, _ = c.validate_quantity(n)
     assert not ok
 
 def test_min_notional_violation():
     c = extract_market_constraints(_sample_market())
-    assert not c.validate_notional(Decimal("1000"))[0]
-    assert c.validate_notional(Decimal("20000"))[0]
+    assert not c.validate_notional(Decimal(1000))[0]
+    assert c.validate_notional(Decimal(20000))[0]
 
 def test_missing_metadata_active_false():
     c = extract_market_constraints(_sample_market(active=False))

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import math
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -16,21 +13,20 @@ from tko.risk.pnl_tracker import DailyPnLTracker
 
 
 def _settings(**kw) -> Settings:
-    base = dict(
-        max_order_notional=500_000,
-        max_daily_notional=5_000_000,
-        max_position_pct=100,
-        min_quote_balance=1,
-        max_open_positions=10,
-        max_daily_loss_pct=5.0,
-        daily_equity_baseline=1_000_000,
-        take_profit_pct=2.0,
-        stop_loss_pct=1.0,
-    )
+    base = {
+        "max_order_notional": 500_000,
+        "max_daily_notional": 5_000_000,
+        "max_position_pct": 100,
+        "min_quote_balance": 1,
+        "max_open_positions": 10,
+        "max_daily_loss_pct": 5.0,
+        "daily_equity_baseline": 1_000_000,
+        "take_profit_pct": 2.0,
+        "stop_loss_pct": 1.0,
+    }
     base.update(kw)
     if base.get("max_daily_notional", 0) and base.get("max_order_notional", 0):
-        if base["max_order_notional"] > base["max_daily_notional"]:
-            base["max_order_notional"] = base["max_daily_notional"]
+        base["max_order_notional"] = min(base["max_order_notional"], base["max_daily_notional"])
     if base.get("max_open_positions", 1) < 1:
         base["max_open_positions"] = 1
     base.setdefault("market_data_max_age_sec", 0)

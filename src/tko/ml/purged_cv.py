@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from itertools import combinations
-from typing import Iterator, Sequence
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,12 +93,12 @@ def combinatorial_purged_cv(
             for i in groups[g]:
                 label_end = i + label_horizon
                 # purge vs any test index range
-                if label_horizon > 0 and test_idx:
-                    if not (label_end < test_idx[0] or i > test_idx[-1]):
-                        continue
-                if embargo > 0 and test_idx:
-                    if any(abs(i - t) <= embargo for t in (test_idx[0], test_idx[-1])):
-                        continue
+                if label_horizon > 0 and test_idx and not (label_end < test_idx[0] or i > test_idx[-1]):
+                    continue
+                if embargo > 0 and test_idx and any(
+                    abs(i - t) <= embargo for t in (test_idx[0], test_idx[-1])
+                ):
+                    continue
                 train_idx.append(i)
         if train_idx and test_idx:
             folds.append(Fold(train_idx=tuple(train_idx), test_idx=tuple(test_idx)))

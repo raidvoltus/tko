@@ -34,17 +34,15 @@ def test_validate_rejects_placeholder():
 def test_load_validates_payload(monkeypatch):
     monkeypatch.setattr("tko.core.credentials._keyring_available", lambda: True)
     payload = json.dumps({"api_key": "ab", "api_secret": "cd"})
-    with patch("keyring.get_password", return_value=payload):
-        with pytest.raises(CredentialError):
-            load_tokocrypto()
+    with patch("keyring.get_password", return_value=payload), pytest.raises(CredentialError):
+        load_tokocrypto()
 
 
 def test_load_validates_missing_fields(monkeypatch):
     monkeypatch.setattr("tko.core.credentials._keyring_available", lambda: True)
     payload = json.dumps({"api_key": "present_but_no_secret_ok"})
-    with patch("keyring.get_password", return_value=payload):
-        with pytest.raises(CredentialError):
-            load_tokocrypto()
+    with patch("keyring.get_password", return_value=payload), pytest.raises(CredentialError):
+        load_tokocrypto()
 
 
 def test_load_accepts_valid(monkeypatch):
@@ -66,6 +64,5 @@ def test_load_missing_raises_not_found(monkeypatch):
         "tko.core.credentials._legacy_cred_file",
         lambda: __import__("pathlib").Path("/nonexistent/tko_cred.json"),
     )
-    with patch("keyring.get_password", return_value=None):
-        with pytest.raises(CredentialNotFoundError):
-            load_tokocrypto()
+    with patch("keyring.get_password", return_value=None), pytest.raises(CredentialNotFoundError):
+        load_tokocrypto()

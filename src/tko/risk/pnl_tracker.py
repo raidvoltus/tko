@@ -21,7 +21,7 @@ DEFAULT_TZ = "Asia/Jakarta"
 def _day_key(ts: float, tz_name: str) -> str:
     try:
         tz = ZoneInfo(tz_name)
-    except Exception:
+    except Exception:  # noqa: BLE001
         tz = ZoneInfo("UTC")
     return datetime.fromtimestamp(ts, tz=tz).strftime("%Y-%m-%d")
 

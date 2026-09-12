@@ -8,6 +8,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Self
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +31,8 @@ def _pid_alive(pid: int) -> bool:
                 kernel32.CloseHandle(handle)
                 return True
             err = kernel32.GetLastError()
-            if err == 5:
-                return True
-            return False
-        except Exception:
+            return err == 5
+        except Exception:  # noqa: BLE001
             return True
     try:
         os.kill(pid, 0)
@@ -100,7 +99,7 @@ class InstanceLock:
             logger.warning("Failed to release lock %s: %s", self.lock_path, exc)
         logger.info("event=instance_lock_released path=%s", self.lock_path)
 
-    def __enter__(self) -> "InstanceLock":
+    def __enter__(self) -> Self:
         self.acquire()
         return self
 

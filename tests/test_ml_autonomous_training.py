@@ -9,7 +9,7 @@ import pytest
 
 from tko.core.config import Settings
 from tko.core.types import OHLCV, Signal
-from tko.ml.artifacts import load_and_verify_bundle, publish_model_bundle, sha256_bytes
+from tko.ml.artifacts import load_and_verify_bundle, publish_model_bundle
 from tko.ml.calibration import brier_score, evaluate_calibration
 from tko.ml.cusum import CusumConfig, symmetric_cusum_events
 from tko.ml.data_quality import validate_ohlcv
@@ -51,7 +51,7 @@ def test_data_quality_detects_duplicates_and_gaps():
     c = _synth(50)
     # duplicate
     c2 = list(c) + [c[10]]
-    clean, rep = validate_ohlcv(c2, timeframe="15m")
+    _clean, rep = validate_ohlcv(c2, timeframe="15m")
     assert rep.duplicates >= 1
     assert rep.usable_rows == 50
     # gap

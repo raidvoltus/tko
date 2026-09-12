@@ -19,16 +19,16 @@ from tko.strategy.btc import TradeDecision
 
 
 def _settings(**kw) -> Settings:
-    base = dict(
-        max_order_notional=1_000_000,
-        max_daily_notional=5_000_000,
-        max_position_pct=50,
-        min_quote_balance=1,
-        max_open_positions=5,
-        max_daily_loss_pct=5.0,
-        base_asset="BTC",
-        quote_asset="IDR",
-    )
+    base = {
+        "max_order_notional": 1_000_000,
+        "max_daily_notional": 5_000_000,
+        "max_position_pct": 50,
+        "min_quote_balance": 1,
+        "max_open_positions": 5,
+        "max_daily_loss_pct": 5.0,
+        "base_asset": "BTC",
+        "quote_asset": "IDR",
+    }
     base.update(kw)
     base.setdefault("market_data_max_age_sec", 0)
     return Settings(**base)
