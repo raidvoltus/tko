@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import multiprocessing
 import logging
 import signal
 import sys
@@ -245,12 +246,34 @@ def cmd_gui(_: argparse.Namespace) -> int:
     return gui_main()
 
 
+def cmd_version(_: argparse.Namespace) -> int:
+    """Print version / build metadata (no secrets)."""
+    from tko import __version__
+    from tko.runtime.paths import is_frozen, app_root, data_root
+    import platform
+    build = {
+        "version": __version__,
+        "commit": __import__("os").environ.get("TKO_BUILD_COMMIT", "unknown"),
+        "build_time": __import__("os").environ.get("TKO_BUILD_TIME", "unknown"),
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "frozen": is_frozen(),
+        "app_root": str(app_root()),
+        "data_root": str(data_root()),
+    }
+    for k, v in build.items():
+        print(f"{k}={v}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(prog="tko", description="TKO Tokocrypto LIVE bot")
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     sub = parser.add_subparsers(dest="command")
 
+    sub.add_parser("version", help="show version/build metadata").set_defaults(func=cmd_version)
     sub.add_parser("setup").set_defaults(func=cmd_setup)
     sub.add_parser("run").set_defaults(func=cmd_run)
     sub.add_parser("status").set_defaults(func=cmd_status)
@@ -275,8 +298,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.version:
-        print(__version__)
-        return 0
+        return cmd_version(args)
     if args.smoke:
         print(f"tko {__version__} smoke OK")
         return 0
