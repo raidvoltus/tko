@@ -51,6 +51,16 @@ class Settings(BaseSettings):
     ml_min_confidence: float = Field(default=0.55, ge=0.5, le=0.99)
     ml_model_path: str = ""
     ohlcv_store_enabled: bool = True
+    # Stage 5.1 diversity / pool / ensemble / governor (default OFF)
+    ml_governor_enabled: bool = False
+    ml_profile: str = "ULTRA_LITE"
+    ml_pool_max_models: int = Field(default=5, ge=1, le=7)
+    ml_n_jobs: int = Field(default=1, ge=1, le=1)
+    ml_max_trees: int = Field(default=40, ge=1, le=50)
+    ml_max_depth: int = Field(default=4, ge=1, le=4)
+    ml_max_training_rows: int = Field(default=3000, ge=100, le=5000)
+    ml_safe_exit_on_pressure: bool = True
+    ml_diversity_threshold: float = Field(default=0.80, ge=0.5, le=1.0)
 
     max_daily_loss_pct: float = Field(default=5.0, gt=0, le=100.0)
     max_open_positions: int = Field(default=3, ge=1, le=50)
@@ -72,6 +82,7 @@ class Settings(BaseSettings):
 
     reconcile_interval_sec: float = Field(default=900.0, ge=30.0, le=86_400.0)
     heartbeat_stale_sec: float = Field(default=300.0, ge=30.0, le=86_400.0)
+    market_data_max_age_sec: float = Field(default=60.0, ge=0.0, le=3600.0)
     watchdog_enabled: bool = True
     telegram_kill_command: bool = True
 
