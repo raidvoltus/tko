@@ -33,11 +33,41 @@ def _setup_logging(level: str) -> None:
     )
 
 
+def _read_secret(prompt: str, *, allow_visible: bool = True) -> str:
+    """Read secret on Windows-friendly terminals.
+
+    getpass hides keystrokes (looks like 'cannot type'). Some Windows consoles
+    also break paste under getpass. Offer a visible fallback when needed.
+    """
+    print(prompt, end="", flush=True)
+    print("  [karakter disembunyikan — ketik lalu Enter; paste: klik kanan]")
+    try:
+        value = getpass("").strip()
+    except Exception:
+        value = ""
+    if value:
+        return value
+    if not allow_visible:
+        return ""
+    print("Input kosong / getpass gagal. Mode terlihat (echo ON):")
+    return input(prompt).strip()
+
+
 def cmd_setup(_: argparse.Namespace) -> int:
     print("=== TKO Credential Setup (Tokocrypto LIVE) ===")
-    print("Kredensial disimpan di OS keyring (fail-closed).\n")
+    print("Kredensial disimpan di OS keyring (fail-closed).")
+    print("")
+    print("Catatan Secret Key:")
+    print("  - Saat ketik, karakter TIDAK muncul (bukan error).")
+    print("  - Ketik secret lengkap, lalu tekan Enter.")
+    print("  - Jika paste gagal: ketik manual, atau pilih mode terlihat.")
+    print("")
     api_key = input("Tokocrypto API Key: ").strip()
-    api_secret = getpass("Tokocrypto API Secret: ").strip()
+    visible = input("Tampilkan Secret Key saat mengetik? [y/N]: ").strip().lower() in ("y", "yes")
+    if visible:
+        api_secret = input("Tokocrypto API Secret (terlihat): ").strip()
+    else:
+        api_secret = _read_secret("Tokocrypto API Secret: ")
     if not api_key or not api_secret:
         print("API key/secret wajib diisi.")
         return 1
@@ -49,7 +79,11 @@ def cmd_setup(_: argparse.Namespace) -> int:
     print("Tokocrypto credentials saved to keyring.\n")
     use_tg = input("Setup Telegram? [y/N]: ").strip().lower()
     if use_tg in ("y", "yes"):
-        token = input("Telegram Bot Token: ").strip()
+        token_visible = input("Tampilkan Bot Token saat mengetik? [y/N]: ").strip().lower() in ("y", "yes")
+        if token_visible:
+            token = input("Telegram Bot Token (terlihat): ").strip()
+        else:
+            token = _read_secret("Telegram Bot Token: ")
         chat = input("Telegram Chat ID: ").strip()
         if token and chat:
             try:
@@ -58,7 +92,7 @@ def cmd_setup(_: argparse.Namespace) -> int:
             except CredentialError as exc:
                 print(f"Gagal Telegram: {exc}")
                 return 1
-    print("\nSelesai. Jalankan: python -m tko run")
+    print("\nSelesai. Jalankan: TKO-Core.exe run")
     return 0
 
 
