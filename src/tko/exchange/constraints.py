@@ -16,6 +16,37 @@ def _to_decimal(value: Any) -> Decimal | None:
         return None
 
 
+def _precision_fields(value: Any) -> tuple[int | None, Decimal | None]:
+    """CCXT precision may be decimal-places (int) OR tick/step size (float/str).
+
+    Returns (decimal_places, step_or_tick). Exactly one side is usually set.
+    """
+    if value is None:
+        return None, None
+    if isinstance(value, bool):
+        return None, None
+    if isinstance(value, int):
+        return value, None
+    if isinstance(value, float):
+        d = _to_decimal(value)
+        if d is None:
+            return None, None
+        if d == d.to_integral_value() and Decimal(0) <= d <= Decimal(18):
+            return int(d), None
+        return None, d
+    s = str(value).strip()
+    if not s:
+        return None, None
+    if s.isdigit() or (s[0] == "-" and s[1:].isdigit()):
+        return int(s), None
+    d = _to_decimal(s)
+    if d is None:
+        return None, None
+    if d == d.to_integral_value() and Decimal(0) <= d <= Decimal(18):
+        return int(d), None
+    return None, d
+
+
 @dataclass(frozen=True, slots=True)
 class MarketConstraints:
     symbol: str
@@ -70,23 +101,18 @@ class MarketConstraints:
     def validate_quantity(self, qty: Decimal | float | str, *, market_order: bool = True) -> tuple[bool, str]:
         q = qty if isinstance(qty, Decimal) else Decimal(str(qty))
         if q <= 0:
-            return False, "quantity is zero or negative after normalization"
-        min_q = self.get_min_qty(market_order=market_order)
-        max_q = self.get_max_qty(market_order=market_order)
-        if min_q is not None and q < min_q:
-            return False, f"quantity {q} < minQty {min_q}"
-        if max_q is not None and max_q > 0 and q > max_q:
-            return False, f"quantity {q} > maxQty {max_q}"
-        return True, "ok"
-
-    def validate_notional(self, notional: Decimal | float | str) -> tuple[bool, str]:
-        n = notional if isinstance(notional, Decimal) else Decimal(str(notional))
-        if n <= 0:
-            return False, "notional is zero or negative"
-        if self.cost_min is not None and n < self.cost_min:
-            return False, f"notional {n} < minNotional {self.cost_min}"
-        if self.cost_max is not None and self.cost_max > 0 and n > self.cost_max:
-            return False, f"notional {n} > maxNotional {self.cost_max}"
+            return False, "quantity must be > 0"
+        mn = self.get_min_qty(market_order=market_order)
+        mx = self.get_max_qty(market_order=market_order)
+        if mn is not None and q < mn:
+            return False, f"quantity {q} < min {mn}"
+        if mx is not None and q > mx:
+            return False, f"quantity {q} > max {mx}"
+        step = self.get_step_size(market_order=market_order)
+        if step is not None and step > 0:
+            rem = (q / step) % 1
+            if rem != 0:
+                return False, f"quantity {q} not aligned to step {step}"
         return True, "ok"
 
 
@@ -102,18 +128,8 @@ def extract_market_constraints(market: dict[str, Any]) -> MarketConstraints:
     precision = market.get("precision") or {}
     amount_prec = precision.get("amount")
     price_prec = precision.get("price")
-    if isinstance(amount_prec, float):
-        amount_step_from_prec = _to_decimal(amount_prec)
-        amount_prec_int = None
-    else:
-        amount_step_from_prec = None
-        amount_prec_int = int(amount_prec) if amount_prec is not None else None
-    if isinstance(price_prec, float):
-        price_tick_from_prec = _to_decimal(price_prec)
-        price_prec_int = None
-    else:
-        price_tick_from_prec = None
-        price_prec_int = int(price_prec) if price_prec is not None else None
+    amount_prec_int, amount_step_from_prec = _precision_fields(amount_prec)
+    price_prec_int, price_tick_from_prec = _precision_fields(price_prec)
     amount_min = _to_decimal(amount_lim.get("min"))
     amount_max = _to_decimal(amount_lim.get("max"))
     amount_step = amount_step_from_prec
@@ -144,11 +160,20 @@ def extract_market_constraints(market: dict[str, Any]) -> MarketConstraints:
             elif ft == "PRICE_FILTER":
                 price_tick = _to_decimal(f.get("tickSize")) or price_tick
     return MarketConstraints(
-        symbol=symbol, base=base, quote=quote, active=active,
-        amount_min=amount_min, amount_max=amount_max, amount_step=amount_step,
-        cost_min=cost_min, cost_max=cost_max, price_tick=price_tick,
-        amount_precision=amount_prec_int, price_precision=price_prec_int,
-        market_amount_min=market_amount_min, market_amount_max=market_amount_max,
+        symbol=symbol,
+        base=base,
+        quote=quote,
+        active=active,
+        amount_min=amount_min,
+        amount_max=amount_max,
+        amount_step=amount_step,
+        cost_min=cost_min,
+        cost_max=cost_max,
+        price_tick=price_tick,
+        amount_precision=amount_prec_int,
+        price_precision=price_prec_int,
+        market_amount_min=market_amount_min,
+        market_amount_max=market_amount_max,
         market_amount_step=market_amount_step,
         raw_info=info if isinstance(info, dict) else None,
     )
