@@ -9,6 +9,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
@@ -26,4 +27,13 @@ jobs:
       - name: Unit tests
         run: pytest -q -m "not integration"
       - name: Integration tests
-        run: pytest -q -m integration
+        run: |
+          # Exit code 5 = no tests selected for marker; treat as success when suite has none yet.
+          set +e
+          pytest -q -m integration
+          code=$?
+          if [ "$code" -eq 5 ]; then
+            echo "No integration tests collected; OK"
+            exit 0
+          fi
+          exit "$code"
