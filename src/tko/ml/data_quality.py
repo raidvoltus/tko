@@ -76,7 +76,6 @@ def validate_ohlcv(
         return [], report
 
     step = _tf_ms(timeframe)
-    # sort + dedupe by timestamp (keep first)
     ordered = sorted(candles, key=lambda c: int(c.timestamp_ms))
     seen: set[int] = set()
     clean: list[OHLCV] = []
@@ -88,16 +87,15 @@ def validate_ohlcv(
             continue
         seen.add(ts)
         if expect_utc_ms and ts < 1_000_000_000_000:
-            # likely seconds not ms
             report.invalid_rows += 1
             report.notes.append(f"non_ms_timestamp:{ts}")
             continue
-        o, h, l, cl, v = float(c.open), float(c.high), float(c.low), float(c.close), float(c.volume)
-        if not all(_finite(x) for x in (o, h, l, cl, v)):
+        o, h, low, cl, v = float(c.open), float(c.high), float(c.low), float(c.close), float(c.volume)
+        if not all(_finite(x) for x in (o, h, low, cl, v)):
             report.nan_or_inf += 1
             report.invalid_rows += 1
             continue
-        if h < max(o, cl) or l > min(o, cl) or h < l or o <= 0 or cl <= 0:
+        if h < max(o, cl) or low > min(o, cl) or h < low or o <= 0 or cl <= 0:
             report.bad_ohlc += 1
             report.invalid_rows += 1
             continue
@@ -109,7 +107,6 @@ def validate_ohlcv(
         if prev_ts is not None and step > 0:
             gap = ts - prev_ts
             if gap > step * 1.5:
-                # count missing intervals
                 report.missing_intervals += max(0, round(gap / step) - 1)
         prev_ts = ts
         clean.append(c)
