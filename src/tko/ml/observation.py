@@ -47,7 +47,11 @@ class ObservationWindow:
     def events(self) -> list[dict[str, Any]]:
         if not self.path.exists():
             return []
-        return [json.loads(l) for l in self.path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        return [
+            json.loads(line)
+            for line in self.path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
 
     def status(self) -> dict[str, Any]:
         ev = self.events()
