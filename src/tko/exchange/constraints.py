@@ -101,18 +101,23 @@ class MarketConstraints:
     def validate_quantity(self, qty: Decimal | float | str, *, market_order: bool = True) -> tuple[bool, str]:
         q = qty if isinstance(qty, Decimal) else Decimal(str(qty))
         if q <= 0:
-            return False, "quantity must be > 0"
-        mn = self.get_min_qty(market_order=market_order)
-        mx = self.get_max_qty(market_order=market_order)
-        if mn is not None and q < mn:
-            return False, f"quantity {q} < min {mn}"
-        if mx is not None and q > mx:
-            return False, f"quantity {q} > max {mx}"
-        step = self.get_step_size(market_order=market_order)
-        if step is not None and step > 0:
-            rem = (q / step) % 1
-            if rem != 0:
-                return False, f"quantity {q} not aligned to step {step}"
+            return False, "quantity is zero or negative after normalization"
+        min_q = self.get_min_qty(market_order=market_order)
+        max_q = self.get_max_qty(market_order=market_order)
+        if min_q is not None and q < min_q:
+            return False, f"quantity {q} < minQty {min_q}"
+        if max_q is not None and max_q > 0 and q > max_q:
+            return False, f"quantity {q} > maxQty {max_q}"
+        return True, "ok"
+
+    def validate_notional(self, notional: Decimal | float | str) -> tuple[bool, str]:
+        n = notional if isinstance(notional, Decimal) else Decimal(str(notional))
+        if n <= 0:
+            return False, "notional is zero or negative"
+        if self.cost_min is not None and n < self.cost_min:
+            return False, f"notional {n} < minNotional {self.cost_min}"
+        if self.cost_max is not None and self.cost_max > 0 and n > self.cost_max:
+            return False, f"notional {n} > maxNotional {self.cost_max}"
         return True, "ok"
 
 
