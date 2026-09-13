@@ -1,12 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 # TKO-GUI — IPC client only. NO exchange, NO credentials decryption surface.
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
 _sp = Path(SPECPATH).resolve()
 SPECDIR = _sp.parent if _sp.is_file() else _sp
 ROOT = SPECDIR.parent
 
+datas = []
 hiddenimports = [
     "tko",
     "tko.gui",
@@ -16,11 +18,20 @@ hiddenimports = [
     "tko.ipc.transport",
 ]
 
+try:
+    datas += collect_data_files("tzdata")
+except Exception:
+    pass
+try:
+    hiddenimports += ["tzdata"]
+except Exception:
+    pass
+
 a = Analysis(
     [str(ROOT / "src" / "tko" / "gui" / "__main__.py")],
     pathex=[str(ROOT / "src")],
     binaries=[],
-    datas=[],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
