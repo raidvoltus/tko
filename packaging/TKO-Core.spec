@@ -1,13 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 # TKO-Core — trading process (onedir). Credentials/state NEVER bundled.
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 _sp = Path(SPECPATH).resolve()
 SPECDIR = _sp.parent if _sp.is_file() else _sp
 ROOT = SPECDIR.parent
 
+datas = []
 hiddenimports = [
     "tko",
     "tko.runtime",
@@ -35,7 +36,7 @@ hiddenimports = [
     "tko.risk.market_data",
     "tko.execution.engine",
     "tko.execution.intent",
-    "tko.execution.fill_journal",
+    "tko.execution.fills_journal",
     "tko.reconciliation.reconciler",
     "tko.notify.telegram",
     "tko.core.redact",
@@ -68,6 +69,7 @@ hiddenimports = [
     "keyring.backends",
     "keyring.backends.Windows",
     "keyring.backends.fail",
+    "tzdata",
 ]
 try:
     hiddenimports += collect_submodules("ccxt")
@@ -77,12 +79,16 @@ try:
     hiddenimports += collect_submodules("tko.ml")
 except Exception:
     pass
+try:
+    datas += collect_data_files("tzdata")
+except Exception:
+    pass
 
 a = Analysis(
     [str(ROOT / "src" / "tko" / "__main__.py")],
     pathex=[str(ROOT / "src")],
     binaries=[],
-    datas=[],
+    datas=datas,
     hiddenimports=sorted(set(hiddenimports)),
     hookspath=[],
     hooksconfig={},
