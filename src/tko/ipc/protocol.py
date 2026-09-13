@@ -29,9 +29,8 @@ PIPE_NAME = r"\\.\pipe\tko-core-v1"
 PROTO_VERSION = 1
 MAX_FRAME = 1 << 20  # 1 MiB
 
-# 32 bytes entropy → 64 ascii hex chars
 _TOKEN_HEX_LEN = 64
-_TOKEN_MIN_LEN = 32  # absolute minimum accepted bytes after strip
+_TOKEN_MIN_LEN = 32
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +55,8 @@ def default_ipc_port() -> int:
 def _is_valid_token_bytes(raw: bytes) -> bool:
     if not raw or len(raw) < _TOKEN_MIN_LEN:
         return False
-    # reject whitespace / control characters
     if any(b <= 0x20 or b >= 0x7F for b in raw):
         return False
-    # production tokens are hex from secrets.token_hex
     try:
         text = raw.decode("ascii")
     except UnicodeDecodeError:
@@ -110,7 +107,6 @@ def _harden_permissions(path: Path) -> None:
             or os.environ.get("USER")
             or getpass.getuser()
         )
-        # inheritance remove; grant SYSTEM + Administrators + current user only
         cmd = [
             "icacls",
             str(path),
@@ -149,27 +145,27 @@ def ensure_token(path: Path | None = None) -> bytes:
             f"cannot create directory {path.parent}"
         ) from exc
 
-    # Fast path — valid existing token
+    # Fast path — valid existing token (retry: concurrent writer may still flush)
     if path.exists():
-        return _read_validate(path)
+        return _read_validate_retry(path)
 
     tok = secrets.token_hex(32).encode("ascii")  # CSPRNG
+    tmp = path.with_name(path.name + f".{os.getpid()}.{secrets.token_hex(4)}.tmp")
     created = False
     try:
-        # Exclusive create of the canonical path (race-safe on Windows + POSIX)
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
         if hasattr(os, "O_BINARY"):
             flags |= os.O_BINARY  # type: ignore[attr-defined]
-        fd = os.open(str(path), flags, 0o600)
+        fd_final = os.open(str(path), flags, 0o600)
         try:
-            os.write(fd, tok)
+            os.write(fd_final, tok)
             try:
-                os.fsync(fd)
+                os.fsync(fd_final)
             except OSError:
                 pass
             created = True
         finally:
-            os.close(fd)
+            os.close(fd_final)
     except FileExistsError:
         return _read_validate_retry(path)
     except OSError as exc:
@@ -178,15 +174,20 @@ def ensure_token(path: Path | None = None) -> bytes:
         raise IpcTokenError(
             f"IPC authentication material is missing or invalid: cannot create {path}"
         ) from exc
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     if created:
         _harden_permissions(path)
         logger.info("event=ipc_token_initialized path=%s", path)
 
-    return _read_validate(path)
+    return _read_validate_retry(path)
 
 
-def _read_validate_retry(path: Path, attempts: int = 20, delay: float = 0.01) -> bytes:
+def _read_validate_retry(path: Path, attempts: int = 50, delay: float = 0.02) -> bytes:
     """Retry read briefly — writer may still be flushing under contention."""
     last: Exception | None = None
     for _ in range(attempts):
