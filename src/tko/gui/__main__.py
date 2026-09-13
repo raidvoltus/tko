@@ -1,6 +1,6 @@
-import multiprocessing
-
 """python -m tko.gui"""
+
+import multiprocessing
 
 from tko.gui.app import main
 
