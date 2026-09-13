@@ -88,6 +88,7 @@ def test_install_refuses_without_force_when_exists():
         patch("tko.runtime.windows_service.task_exists", return_value=True),
         patch("tko.runtime.windows_service.resolve_exe_and_workdir") as res,
         patch("tko.runtime.windows_service.ensure_portable_marker"),
+        patch("tko.ipc.protocol.ensure_token", return_value=b"a" * 64),
         patch.object(Path, "exists", return_value=True),
     ):
         res.return_value = (Path(r"C:\tko\tko.exe"), Path(r"C:\tko"))
@@ -104,6 +105,7 @@ def test_install_success_with_force():
         patch("tko.runtime.windows_service.run_schtasks", return_value=mock_proc) as run,
         patch("tko.runtime.windows_service.resolve_exe_and_workdir") as res,
         patch("tko.runtime.windows_service.ensure_portable_marker"),
+        patch("tko.ipc.protocol.ensure_token", return_value=b"a" * 64),
         patch.object(Path, "exists", return_value=True),
     ):
         res.return_value = (Path(r"C:\tko\tko.exe"), Path(r"C:\tko"))
@@ -123,6 +125,7 @@ def test_install_access_denied_message():
         patch("tko.runtime.windows_service.run_schtasks", return_value=mock_proc),
         patch("tko.runtime.windows_service.resolve_exe_and_workdir") as res,
         patch("tko.runtime.windows_service.ensure_portable_marker"),
+        patch("tko.ipc.protocol.ensure_token", return_value=b"a" * 64),
         patch.object(Path, "exists", return_value=True),
     ):
         res.return_value = (Path(r"C:\tko\tko.exe"), Path(r"C:\tko"))

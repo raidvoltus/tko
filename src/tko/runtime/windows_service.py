@@ -119,6 +119,17 @@ def install_scheduled_task(
     plan = build_service_plan(task_name)
     if not plan.exe_path.exists():
         return ServiceResult(False, f"Executable tidak ditemukan: {plan.exe_path}")
+    # First-run IPC material: create ProgramData/TKO/ipc.token before task runs
+    try:
+        from tko.ipc.protocol import ensure_token
+
+        ensure_token()
+    except Exception as exc:  # noqa: BLE001
+        return ServiceResult(
+            False,
+            "IPC token bootstrap gagal — tidak memasang auto-start tanpa auth material.",
+            detail=str(exc)[:300],
+        )
     if create_portable_marker:
         ensure_portable_marker(plan.work_dir)
     if task_exists(plan.task_name) and not force:
@@ -232,6 +243,16 @@ def install_scheduled_task_xml(
     plan = build_service_plan(task_name)
     if not plan.exe_path.exists():
         return ServiceResult(False, f"Executable tidak ditemukan: {plan.exe_path}")
+    try:
+        from tko.ipc.protocol import ensure_token
+
+        ensure_token()
+    except Exception as exc:  # noqa: BLE001
+        return ServiceResult(
+            False,
+            "IPC token bootstrap gagal — tidak memasang auto-start tanpa auth material.",
+            detail=str(exc)[:300],
+        )
     ensure_portable_marker(plan.work_dir)
     out_dir = xml_dir or plan.work_dir
     out_dir.mkdir(parents=True, exist_ok=True)

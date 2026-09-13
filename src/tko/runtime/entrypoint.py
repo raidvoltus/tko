@@ -291,7 +291,6 @@ def main(argv: list[str] | None = None) -> int:
     p_install = sub.add_parser("install-service")
     p_install.add_argument("--task-name", default="TkoBot")
     p_install.add_argument("--force", action="store_true")
-    p_install.add_argument("--use_system", action="store_true")
     p_install.set_defaults(func=cmd_install_service)
 
     p_uninstall = sub.add_parser("uninstall-service")

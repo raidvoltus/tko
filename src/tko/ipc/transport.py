@@ -17,7 +17,6 @@ from tko.ipc.protocol import (
     PIPE_NAME,
     default_ipc_port,
     ensure_token,
-    load_token,
     pack,
     split_header,
     unpack,
@@ -231,10 +230,22 @@ class IPCClient:
         self._use_named_pipe = os.name == "nt" and os.environ.get("TKO_IPC_TCP", "") != "1"
 
     def connect(self) -> bool:
+        # Share bootstrap with Core: ensure_token creates on first-run, loads if present.
+        # Corrupt/empty material fails closed (IpcTokenError) — never silent fallback.
         try:
-            self._token = load_token(self._token_path) if self._token_path else load_token()
-        except FileNotFoundError as exc:
+
+            self._token = ensure_token(self._token_path) if self._token_path else ensure_token()
+        except (FileNotFoundError, OSError, ValueError) as exc:
             self.last_error = str(exc)
+            self.connected = False
+            return False
+        except Exception as exc:  # noqa: BLE001
+            # IpcTokenError and unexpected IO
+            name = type(exc).__name__
+            if name == "IpcTokenError" or "IPC authentication" in str(exc):
+                self.last_error = str(exc)
+            else:
+                self.last_error = f"IPC authentication material is missing or invalid: {exc}"
             self.connected = False
             return False
         return self._connect_pipe() if self._use_named_pipe else self._connect_tcp()
