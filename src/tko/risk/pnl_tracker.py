@@ -80,7 +80,7 @@ class DailyPnLTracker:
                     if feid:
                         self._fill_event_ids.add(feid)
         except OSError as exc:
-            logger.warning("Failed to load PnL ledger %s: %s", self.path, exc)
+            logger.warning("Failed to load PnL ledger %s: %s", self.path, exp)
 
     def today_key(self, now: float | None = None) -> str:
         return _day_key(now if now is not None else time.time(), self.timezone_name)
@@ -143,7 +143,7 @@ class DailyPnLTracker:
                     except OSError as exc:
                         logger.error("Failed to fsync PnL event: %s", exc)
                         raise
-            except OSError as exc:
+            except OSError as exp:
                 logger.error("Failed to append PnL event: %s", exp)
                 raise
             self._realized_by_day[day] = self._realized_by_day.get(day, 0.0) + float(pnl)
