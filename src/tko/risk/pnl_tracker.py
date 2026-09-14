@@ -80,7 +80,7 @@ class DailyPnLTracker:
                     if feid:
                         self._fill_event_ids.add(feid)
         except OSError as exc:
-            logger.warning("Failed to load PnL ledger %s: %s", self.path, exp)
+            logger.warning("Failed to load PnL ledger %s: %s", self.path, exc)
 
     def today_key(self, now: float | None = None) -> str:
         return _day_key(now if now is not None else time.time(), self.timezone_name)
