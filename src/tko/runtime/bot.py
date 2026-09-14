@@ -23,6 +23,9 @@ from tko.risk.position_store import PositionStore
 from tko.runtime.lifecycle import LifecycleGovernor, LifecycleState
 from tko.runtime.metrics import MetricsStore
 from tko.runtime.watchdog import Heartbeat
+from tko.marketdata.ws_public import PublicMarketStream
+from tko.marketdata.user_stream import UserDataStream, UserListenTokenClient
+from tko.runtime.readiness import evaluate_readiness
 from tko.strategy.btc import BtcAnalyzer
 from tko.strategy.ranker import best_tradeable, rank_candidates
 
@@ -74,6 +77,9 @@ class TradingBot:
         self._last_reconcile = 0.0
         self._stop_requested = False
         self._recovery_attempts = 0
+        self._public_ws: PublicMarketStream | None = None
+        self._user_stream: UserDataStream | None = None
+        self._streams_started = False
 
     def status_dict(self) -> dict:
         from tko.runtime.ipc_hooks import make_status_dict
@@ -116,6 +122,151 @@ class TradingBot:
         except Exception:  # noqa: BLE001,S110
             pass
         logger.critical("event=runtime_halted reason=%s", reason[:300])
+
+
+    def _subscribe_universe_symbols(self) -> list[str]:
+        """Symbols the bot actually trades (bases × quotes that resolve)."""
+        symbols: list[str] = []
+        bases = self.s.tradeable_base_list()
+        quotes = self.s.quote_asset_list()
+        for base in bases:
+            for quote in quotes:
+                try:
+                    sym = self.client.resolve_symbol(base, quote)
+                except Exception:  # noqa: BLE001
+                    sym = None
+                if sym and sym not in symbols:
+                    symbols.append(sym)
+        return symbols
+
+    def _start_streams(self) -> bool:
+        """Start public WS + user stream after recon. Fail-closed on hard error."""
+        if self._streams_started:
+            return True
+        symbols = self._subscribe_universe_symbols()
+        stale = float(getattr(self.s, "ws_stale_sec", 20.0) or 20.0)
+        try:
+            self._public_ws = PublicMarketStream(stale_sec=stale)
+            if symbols:
+                self._public_ws.subscribe_symbols(symbols, channel="ticker")
+            self._public_ws.start()
+            logger.info("event=ws_public_started symbols=%d", len(symbols))
+        except Exception as exp:  # noqa: BLE001
+            logger.error("event=ws_public_start_failed err=%s", exp)
+            if bool(getattr(self.s, "require_ws_market", True)):
+                return False
+            self._public_ws = None
+
+        try:
+            creds = load_tokocrypto()
+            token_client = UserListenTokenClient(
+                api_key=creds.api_key.get_secret_value(),
+                api_secret=creds.api_secret.get_secret_value(),
+            )
+            self._user_stream = UserDataStream(token_client)
+            self._user_stream.start()
+            logger.info("event=user_stream_started")
+        except Exception as exp:  # noqa: BLE001
+            logger.error("event=user_stream_start_failed err=%s", exp)
+            if bool(getattr(self.s, "require_user_stream", True)):
+                return False
+            self._user_stream = None
+
+        self._streams_started = True
+        return True
+
+    def _stop_streams(self) -> None:
+        for label, stream in (("public_ws", self._public_ws), ("user_stream", self._user_stream)):
+            if stream is None:
+                continue
+            try:
+                stream.stop()
+                logger.info("event=%s_stopped", label)
+            except Exception as exp:  # noqa: BLE001
+                logger.warning("event=%s_stop_error err=%s", label, exp)
+        self._public_ws = None
+        self._user_stream = None
+        self._streams_started = False
+
+    def _public_ws_fresh(self) -> bool:
+        if self._public_ws is None:
+            return not bool(getattr(self.s, "require_ws_market", True))
+        max_age = float(getattr(self.s, "ws_stale_sec", 20.0) or 20.0)
+        try:
+            return bool(self._public_ws.health.is_fresh(max_age_sec=max_age))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _user_stream_healthy(self) -> bool:
+        if self._user_stream is None:
+            return not bool(getattr(self.s, "require_user_stream", True))
+        try:
+            return bool(self._user_stream.health.is_healthy())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _streams_readiness_ok(self) -> tuple[bool, tuple[str, ...]]:
+        """Evaluate stream gates; returns (ok, reasons)."""
+        report = evaluate_readiness(
+            process_alive=True,
+            exchange_ok=True,
+            market_data_fresh=self._public_ws_fresh(),
+            user_stream_healthy=self._user_stream_healthy(),
+            recon_ok=True,
+            risk_healthy=not self.risk.kill_switch_active(),
+            kill_switch_off=not self.risk.kill_switch_active(),
+            require_user_stream=bool(getattr(self.s, "require_user_stream", True)),
+            require_ws_market=bool(getattr(self.s, "require_ws_market", True)),
+        )
+        return report.ready, report.reasons
+
+    def _wait_streams_healthy(self, timeout_sec: float | None = None) -> bool:
+        """Block until streams healthy or timeout. Returns False on failure."""
+        import time as _time
+        limit = float(timeout_sec if timeout_sec is not None else getattr(self.s, "ws_startup_timeout_sec", 45.0))
+        deadline = _time.time() + max(1.0, limit)
+        # First connection may need a few seconds; allow brief grace for "connected but no tick yet"
+        grace_deadline = _time.time() + min(8.0, limit)
+        while _time.time() < deadline:
+            if self._stop_requested:
+                return False
+            ok, reasons = self._streams_readiness_ok()
+            if ok:
+                logger.info("event=streams_healthy reasons=none")
+                return True
+            # Soften: if only market_data_stale during grace and WS reports connected, keep waiting
+            if _time.time() < grace_deadline and self._public_ws is not None:
+                try:
+                    if self._public_ws.health.connected and "user_stream_unhealthy" not in reasons:
+                        _time.sleep(0.5)
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
+            logger.info("event=streams_wait reasons=%s", ",".join(reasons) or "unknown")
+            _time.sleep(0.75)
+        ok, reasons = self._streams_readiness_ok()
+        if not ok:
+            logger.error("event=streams_startup_timeout reasons=%s", ",".join(reasons))
+        return ok
+
+    def _enforce_stream_gates(self) -> bool:
+        """If streams unhealthy while READY → DEGRADED + NO TRADE. Returns True if still tradeable."""
+        if not self.lifecycle.trading_authorized:
+            return False
+        ok, reasons = self._streams_readiness_ok()
+        if ok:
+            return True
+        reason = "stream_unhealthy:" + ",".join(reasons)
+        logger.warning("event=stream_gate_fail reasons=%s → DEGRADED", ",".join(reasons))
+        self.lifecycle.transition(LifecycleState.DEGRADED, reason=reason[:280])
+        self.metrics.set_status("DEGRADED", reason[:200])
+        self._hb("DEGRADED")
+        try:
+            self.audit.record("ERROR", reason=reason[:200])
+        except Exception:  # noqa: BLE001,S110
+            pass
+        return False
+
 
     def _startup_barrier(self) -> bool:
         self.lifecycle.force(LifecycleState.STARTING, reason="startup")
@@ -205,6 +356,28 @@ class TradingBot:
         if getattr(self.risk, "baseline_corrupted", False):
             self._halt(f"risk_baseline_corrupted:{getattr(self.risk, 'baseline_corruption_reason', '')[:200]}")
             return False
+
+        # P0: start live streams only after recon + risk gates; wait until healthy
+        if not self._start_streams():
+            self._halt("stream_start_failed")
+            return False
+        if not self._wait_streams_healthy():
+            # Soft policy: if require flags are on, block READY
+            ok, reasons = self._streams_readiness_ok()
+            if not ok and (
+                bool(getattr(self.s, "require_ws_market", True))
+                or bool(getattr(self.s, "require_user_stream", True))
+            ):
+                self.lifecycle.transition(
+                    LifecycleState.DEGRADED,
+                    reason="streams_not_healthy:" + ",".join(reasons)[:200],
+                )
+                self.metrics.set_status("DEGRADED", "streams_not_healthy")
+                self._hb("DEGRADED")
+                logger.error("event=startup_streams_not_ready reasons=%s", ",".join(reasons))
+                # Do not authorize READY — trading remains blocked
+                return False
+
         if not self.lifecycle.authorize_ready(
             reason="startup_ok",
             recon_ok=recon_ok,
@@ -330,6 +503,9 @@ class TradingBot:
                         self._hb("KILL")
                         time.sleep(self.s.loop_interval_sec)
                         continue
+                    if not self._enforce_stream_gates():
+                        time.sleep(self.s.loop_interval_sec)
+                        continue
                     self._tick()
                     self.lifecycle.mark_tick()
                     self.metrics.set_status("OK")
@@ -365,10 +541,11 @@ class TradingBot:
         self.lifecycle.mark_process_stopped()
         self._hb("STOPPING")
         self.audit.record("DECISION", reason="runtime_stopping")
+        self._stop_streams()
         try:
             self.client.close()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("client close: %s", exc)
+        except Exception as exp:  # noqa: BLE001
+            logger.warning("client close: %s", exp)
         self.lifecycle.force(LifecycleState.STOPPED, reason="shutdown_complete")
         self._hb("STOPPED")
         self.metrics.set_status("STOPPED")
