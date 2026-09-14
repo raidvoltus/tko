@@ -47,16 +47,67 @@ def test_startup_success_to_ready(tmp_path: Path):
         lc.return_value = TokocryptoCredentials(
             SecretStr("valid_api_key_xxxxx"), SecretStr("valid_api_secret_yyyy")
         )
-        bot = TradingBot(Settings(min_quote_balance=1), tmp_path)
+        # Unit test: disable live stream requirements (no network in CI)
+        bot = TradingBot(
+            Settings(
+                min_quote_balance=1,
+                require_ws_market=False,
+                require_user_stream=False,
+            ),
+            tmp_path,
+        )
         bot.client.connect = MagicMock()
         bot.client.fetch_balance = MagicMock(return_value={})
         bot.client._circuit_open = False
         bot.client._rate_limit_until = 0.0
-        bot.reconciler.reconcile_all = MagicMock(return_value=MagicMock())
+        bot.reconciler.reconcile_all = MagicMock(
+            return_value=MagicMock(safe_to_trade=True, notes=[], position_discrepancies=[])
+        )
+        bot._start_streams = MagicMock(return_value=True)
+        bot._wait_streams_healthy = MagicMock(return_value=True)
         ok = bot._startup_barrier()
         assert ok is True
         assert bot.lifecycle.state == LifecycleState.READY
         assert bot.lifecycle.trading_authorized is True
+
+
+def test_startup_streams_required_block_ready(tmp_path: Path):
+    """When require_ws/user_stream ON and streams unhealthy → not READY."""
+    from tko.runtime.bot import TradingBot
+
+    with patch("tko.runtime.bot.load_tokocrypto") as lc, patch(
+        "tko.runtime.bot.load_telegram", return_value=None
+    ):
+        from tko.core.credentials import TokocryptoCredentials
+        from tko.core.types import SecretStr
+
+        lc.return_value = TokocryptoCredentials(
+            SecretStr("valid_api_key_xxxxx"), SecretStr("valid_api_secret_yyyy")
+        )
+        bot = TradingBot(
+            Settings(
+                min_quote_balance=1,
+                require_ws_market=True,
+                require_user_stream=True,
+                ws_startup_timeout_sec=5.0,
+            ),
+            tmp_path,
+        )
+        bot.client.connect = MagicMock()
+        bot.client.fetch_balance = MagicMock(return_value={})
+        bot.client._circuit_open = False
+        bot.client._rate_limit_until = 0.0
+        bot.reconciler.reconcile_all = MagicMock(
+            return_value=MagicMock(safe_to_trade=True, notes=[], position_discrepancies=[])
+        )
+        bot._start_streams = MagicMock(return_value=True)
+        bot._wait_streams_healthy = MagicMock(return_value=False)
+        bot._streams_readiness_ok = MagicMock(
+            return_value=(False, ("market_data_stale", "user_stream_unhealthy"))
+        )
+        ok = bot._startup_barrier()
+        assert ok is False
+        assert bot.lifecycle.state != LifecycleState.READY
 
 
 def test_tick_respects_halted(tmp_path: Path):
@@ -71,7 +122,14 @@ def test_tick_respects_halted(tmp_path: Path):
         lc.return_value = TokocryptoCredentials(
             SecretStr("valid_api_key_xxxxx"), SecretStr("valid_api_secret_yyyy")
         )
-        bot = TradingBot(Settings(min_quote_balance=1), tmp_path)
+        bot = TradingBot(
+            Settings(
+                min_quote_balance=1,
+                require_ws_market=False,
+                require_user_stream=False,
+            ),
+            tmp_path,
+        )
         bot.lifecycle.force(LifecycleState.HALTED, reason="test")
         bot.client.fetch_balance = MagicMock()
         bot._tick()
