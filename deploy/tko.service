@@ -1,0 +1,28 @@
+[Unit]
+Description=TKO Tokocrypto LIVE SPOT Autopilot
+Documentation=https://github.com/raidvoltus/tko
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tko
+Group=tko
+WorkingDirectory=/var/lib/tko
+Environment=TKO_LIVE_MODE=true
+EnvironmentFile=-/etc/tko/tko.env
+ExecStart=/usr/bin/env python3 -m tko run
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+TimeoutStopSec=60
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tko /var/log/tko
+
+[Install]
+WantedBy=multi-user.target
