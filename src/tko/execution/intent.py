@@ -26,7 +26,8 @@ class OrderIntentStatus(str, Enum):
     CONFIRMED = "CONFIRMED"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"  # open remainder; still blocking
     REJECTED = "REJECTED"
-    UNKNOWN = "UNKNOWN"
+    UNKNOWN = "UNKNOWN"  # includes UNKNOWN_DELIVERY_STATE (timeout/5xx after submit)
+    # Alias semantic: treat delivery-unknown same as UNKNOWN — never auto-retry create
     RECONCILIATION = "RECONCILIATION"
     RETRY_ELIGIBLE = "RETRY_ELIGIBLE"
     MANUAL_REVIEW = "MANUAL_REVIEW"
@@ -128,7 +129,8 @@ class IntentStore:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._items: dict[str, OrderIntent] = {}
+        self._items: dict[str, OrderIntent] = {}  # keyed by client_order_id (exchange helper)
+        self._by_intent_id: dict[str, OrderIntent] = {}  # keyed by immutable intent_id (SSOT idempotency)
         self.corrupted: bool = False
         self.corruption_reason: str = ""
         self._load()
@@ -142,6 +144,7 @@ class IntentStore:
                 self.corrupted = True
                 self.corruption_reason = "intent store file is empty"
                 self._items = {}
+                self._by_intent_id = {}
                 logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
                 return
             raw = json.loads(raw_text)
@@ -153,6 +156,7 @@ class IntentStore:
                 logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
                 return
             loaded: dict = {}
+            loaded_by_intent: dict = {}
             for item in items:
                 if not isinstance(item, dict):
                     self.corrupted = True
@@ -168,7 +172,10 @@ class IntentStore:
                     logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
                     return
                 loaded[intent.client_order_id] = intent
+                if intent.intent_id:
+                    loaded_by_intent[intent.intent_id] = intent
             self._items = loaded
+            self._by_intent_id = loaded_by_intent
             self.corrupted = False
             self.corruption_reason = ""
         except Exception as exc:  # noqa: BLE001
@@ -176,7 +183,6 @@ class IntentStore:
             self.corruption_reason = f"intent load failed: {type(exc).__name__}: {exc}"
             self._items = {}
             logger.critical("event=intent_store_corrupted reason=%s", self.corruption_reason)
-
 
     def _save(self) -> None:
         """Atomic replace with best-effort fsync (S5-W1 durability)."""
@@ -280,6 +286,10 @@ class IntentStore:
             strategy=strategy,
         )
         self._items[cid] = intent
+        if intent.intent_id:
+            if intent.intent_id in self._by_intent_id:
+                raise ValueError(f"duplicate intent_id on create: {intent.intent_id}")
+            self._by_intent_id[intent.intent_id] = intent
         self._save()
         return intent
 
@@ -287,7 +297,13 @@ class IntentStore:
         intent.updated_at = time.time()
         with self._lock:
             self._items[intent.client_order_id] = intent
+            if intent.intent_id:
+                self._by_intent_id[intent.intent_id] = intent
             self._save()
+
+    def by_intent_id(self, intent_id: str) -> OrderIntent | None:
+        with self._lock:
+            return self._by_intent_id.get(intent_id)
 
     def by_client_id(self, client_order_id: str) -> OrderIntent | None:
         with self._lock:
