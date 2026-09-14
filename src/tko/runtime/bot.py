@@ -13,6 +13,8 @@ from tko.core.credentials import load_telegram, load_tokocrypto
 from tko.core.types import Side, Signal
 from tko.exchange.tokocrypto import TokocryptoClient
 from tko.execution.engine import ExecutionEngine
+from tko.marketdata.user_stream import UserDataStream, UserListenTokenClient
+from tko.marketdata.ws_public import PublicMarketStream
 from tko.ml.filter import MlSignalFilter
 from tko.ml.ohlcv_store import OhlcvStore
 from tko.notify.telegram import TelegramNotifier
@@ -22,10 +24,8 @@ from tko.risk.pnl_tracker import DailyPnLTracker
 from tko.risk.position_store import PositionStore
 from tko.runtime.lifecycle import LifecycleGovernor, LifecycleState
 from tko.runtime.metrics import MetricsStore
-from tko.runtime.watchdog import Heartbeat
-from tko.marketdata.ws_public import PublicMarketStream
-from tko.marketdata.user_stream import UserDataStream, UserListenTokenClient
 from tko.runtime.readiness import evaluate_readiness
+from tko.runtime.watchdog import Heartbeat
 from tko.strategy.btc import BtcAnalyzer
 from tko.strategy.ranker import best_tradeable, rank_candidates
 
@@ -240,8 +240,8 @@ class TradingBot:
                     if self._public_ws.health.connected and "user_stream_unhealthy" not in reasons:
                         _time.sleep(0.5)
                         continue
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exp:  # noqa: BLE001
+                    logger.debug("event=streams_grace_check_error err=%s", exp)
             logger.info("event=streams_wait reasons=%s", ",".join(reasons) or "unknown")
             _time.sleep(0.75)
         ok, reasons = self._streams_readiness_ok()
