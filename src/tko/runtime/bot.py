@@ -10,7 +10,7 @@ from pathlib import Path
 from tko.audit.audit_log import AuditLog
 from tko.core.config import Settings
 from tko.core.credentials import load_telegram, load_tokocrypto
-from tko.core.types import Side
+from tko.core.types import Side, Signal
 from tko.exchange.tokocrypto import TokocryptoClient
 from tko.execution.engine import ExecutionEngine
 from tko.ml.filter import MlSignalFilter
@@ -24,6 +24,7 @@ from tko.runtime.lifecycle import LifecycleGovernor, LifecycleState
 from tko.runtime.metrics import MetricsStore
 from tko.runtime.watchdog import Heartbeat
 from tko.strategy.btc import BtcAnalyzer
+from tko.strategy.ranker import best_tradeable, rank_candidates
 
 logger = logging.getLogger(__name__)
 STABLE_LIKE = frozenset({"IDR", "USDT", "USDC", "BUSD", "USD", "BNB"})
@@ -430,63 +431,99 @@ class TradingBot:
         return acted
 
     def _try_buy_primary(self, free_map: dict[str, float]) -> None:
+        """Scan tradeable bases × quotes; rank by expected edge; TOP-1 still gated by RiskEngine."""
         if not self.lifecycle.trading_authorized:
             return
-        base = self.s.base_asset.upper()
         quotes = self.s.quote_asset_list()
-        for quote in quotes:
-            free_q = free_map.get(quote, 0.0)
-            if free_q < self.s.min_quote_balance:
-                continue
-            symbol = self.client.resolve_symbol(base, quote)
-            if not symbol:
-                continue
-            try:
-                ohlcv = self.client.fetch_ohlcv(
-                    symbol,
-                    timeframe=self.s.ohlcv_timeframe,
-                    limit=self.s.ohlcv_limit,
-                )
-                ticker = self.client.fetch_ticker(symbol)
-                last = float(ticker.last or 0)
-            except Exception as exp:  # noqa: BLE001
-                logger.warning("market data failed %s: %s", symbol, exp)
-                continue
-            if last <= 0:
-                continue
-            if self.ohlcv_store is not None:
+        bases = self.s.tradeable_base_list()
+        candidates: list = []
+        for base in bases:
+            for quote in quotes:
+                free_q = free_map.get(quote, 0.0)
+                min_q = self.s.min_quote_balance_usdt if quote in ("USDT", "USDC", "USD") else self.s.min_quote_balance
+                if free_q < min_q:
+                    continue
+                symbol = self.client.resolve_symbol(base, quote)
+                if not symbol:
+                    continue
                 try:
-                    self.ohlcv_store.append(symbol, self.s.ohlcv_timeframe, ohlcv)
-                except Exception:  # noqa: BLE001,S110
-                    pass
-            signal = self.strategy.analyze(ohlcv)
-            if self.ml_filter is not None and self.ml_filter.enabled:
-                try:
-                    signal = self.ml_filter.filter(signal, ohlcv)
+                    ohlcv = self.client.fetch_ohlcv(
+                        symbol,
+                        timeframe=self.s.ohlcv_timeframe,
+                        limit=self.s.ohlcv_limit,
+                    )
+                    ticker = self.client.fetch_ticker(symbol)
+                    last = float(ticker.last or 0)
                 except Exception as exp:  # noqa: BLE001
-                    logger.warning("ml filter failed: %s", exp)
-            open_n = len([p for p in self.positions_store.all() if p.amount > 0])
-            md_ts = None
-            try:
-                if getattr(ticker, "timestamp_ms", None):
-                    md_ts = float(ticker.timestamp_ms) / 1000.0
-            except (TypeError, ValueError):
-                md_ts = None
-            decision = self.risk.evaluate_entry(
-                symbol=symbol,
-                quote_free=free_q,
-                last_price=last,
-                signal=signal,
-                open_positions=open_n,
-                quote_asset=quote,
-                market_data_ts=md_ts,
-            )
-            if not decision.approved:
-                logger.info("entry blocked %s: %s", symbol, decision.reason)
-                continue
-            if not self.lifecycle.trading_authorized:
-                return
-            result = self.execution.buy(symbol, base, quote, decision, last)
-            if result:
-                self.notify.send(f"BUY {symbol} filled={result.filled} avg={result.average}")
+                    logger.warning("market data failed %s: %s", symbol, exp)
+                    continue
+                if last <= 0:
+                    continue
+                if self.ohlcv_store is not None:
+                    try:
+                        self.ohlcv_store.append(symbol, self.s.ohlcv_timeframe, ohlcv)
+                    except Exception as exp:  # noqa: BLE001
+                        logger.warning("ohlcv_store append failed %s: %s", symbol, exp)
+                signal_decision = self.strategy.analyze(ohlcv)
+                if self.ml_filter is not None and self.ml_filter.enabled:
+                    try:
+                        fd = self.ml_filter.filter(signal_decision, ohlcv)
+                        if not getattr(fd, "allow", True) and signal_decision.signal == Signal.BUY:
+                            from tko.strategy.btc import TradeDecision as _TD
+                            signal_decision = _TD(Signal.HOLD, f"ml_block:{getattr(fd, 'reason', '')}", 0.0, last)
+                    except Exception as exp:  # noqa: BLE001
+                        logger.warning("ml filter failed: %s", exp)
+                spread_pct = 0.0
+                try:
+                    bid = float(ticker.bid) if ticker.bid is not None else 0.0
+                    ask = float(ticker.ask) if ticker.ask is not None else 0.0
+                    if bid > 0 and ask > 0 and ask >= bid:
+                        mid = (bid + ask) / 2.0
+                        spread_pct = ((ask - bid) / mid) * 100.0 if mid > 0 else 0.0
+                except (TypeError, ValueError):
+                    spread_pct = 0.0
+                candidates.append((symbol, base, quote, signal_decision, spread_pct, free_q, last, ticker))
+
+        if not candidates:
             return
+        ranked_in = [(s, b, q, d, sp) for (s, b, q, d, sp, _fq, _last, _t) in candidates]
+        ranked = rank_candidates(ranked_in)
+        best = best_tradeable(ranked)
+        if best is None:
+            logger.info("event=no_trade reason=no_candidate_passed_edge_gate scanned=%d", len(candidates))
+            return
+        meta = next(c for c in candidates if c[0] == best.symbol and c[1] == best.base and c[2] == best.quote)
+        _symbol, base, quote, _d, _sp, free_q, last, ticker = meta
+        open_n = len([p for p in self.positions_store.all() if p.amount > 0])
+        md_ts = None
+        try:
+            if getattr(ticker, "timestamp_ms", None):
+                md_ts = float(ticker.timestamp_ms) / 1000.0
+        except (TypeError, ValueError):
+            md_ts = None
+        decision = self.risk.evaluate_entry(
+            symbol=best.symbol,
+            quote_free=free_q,
+            last_price=last,
+            signal=best.decision,
+            open_positions=open_n,
+            quote_asset=quote,
+            market_data_ts=md_ts,
+        )
+        if not decision.approved:
+            logger.info("entry blocked %s: %s", best.symbol, decision.reason)
+            return
+        if not self.lifecycle.trading_authorized:
+            return
+        logger.info(
+            "event=candidate_selected symbol=%s net_edge=%.4f strength=%.3f",
+            best.symbol,
+            best.edge.net_edge_pct,
+            best.decision.strength,
+        )
+        result = self.execution.buy(best.symbol, base, quote, decision, last)
+        if result:
+            self.notify.send(
+                f"BUY {best.symbol} filled={result.filled} avg={result.average} edge={best.edge.net_edge_pct:.3f}%"
+            )
+
