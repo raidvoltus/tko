@@ -140,7 +140,15 @@ def test_startup_balance_fail_halts(tmp_path: Path):
         lc.return_value = TokocryptoCredentials(
             SecretStr("valid_api_key_xxxxx"), SecretStr("valid_api_secret_yyyy")
         )
-        bot = TradingBot(Settings(min_quote_balance=1, loop_interval_sec=5), tmp_path)
+        bot = TradingBot(
+            Settings(
+                min_quote_balance=1,
+                loop_interval_sec=5,
+                require_ws_market=False,
+                require_user_stream=False,
+            ),
+            tmp_path,
+        )
         bot.client.connect = MagicMock()
         bot.client.fetch_balance = MagicMock(side_effect=RuntimeError("balance fail"))
         ok = bot._startup_barrier()
@@ -161,7 +169,14 @@ def test_double_stop_idempotent(tmp_path: Path):
         lc.return_value = TokocryptoCredentials(
             SecretStr("valid_api_key_xxxxx"), SecretStr("valid_api_secret_yyyy")
         )
-        bot = TradingBot(Settings(min_quote_balance=1), tmp_path)
+        bot = TradingBot(
+            Settings(
+                min_quote_balance=1,
+                require_ws_market=False,
+                require_user_stream=False,
+            ),
+            tmp_path,
+        )
         bot.client.close = MagicMock()
         bot.stop()
         bot.stop()
