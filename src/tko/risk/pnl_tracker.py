@@ -106,8 +106,8 @@ class DailyPnLTracker:
         *,
         side: str,
         symbol: str,
-        pnl: float,
         notional: float,
+        pnl: float = 0.0,
         order_id: str = "",
         client_order_id: str = "",
         ts: float | None = None,
@@ -144,7 +144,7 @@ class DailyPnLTracker:
                         logger.error("Failed to fsync PnL event: %s", exc)
                         raise
             except OSError as exc:
-                logger.error("Failed to append PnL event: %s", exc)
+                logger.error("Failed to append PnL event: %s", exp)
                 raise
             self._realized_by_day[day] = self._realized_by_day.get(day, 0.0) + float(pnl)
             self._notional_by_day[day] = self._notional_by_day.get(day, 0.0) + abs(float(notional))
