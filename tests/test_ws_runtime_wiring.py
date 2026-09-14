@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from tko.runtime.readiness import evaluate_readiness
-from tko.marketdata.ws_public import StreamHealth
+from tko.marketdata.ws_public import PublicMarketStream, StreamHealth
 from tko.marketdata.user_stream import UserStreamHealth
 
 
@@ -24,6 +25,7 @@ def test_bot_source_wires_public_and_user_stream() -> None:
     assert "self._start_streams()" in BOT
     assert "self._stop_streams()" in BOT
     assert "self._enforce_stream_gates()" in BOT
+    # Must be after recon path, before authorize_ready (ordering contract)
     start_idx = BOT.find("self._start_streams()")
     auth_idx = BOT.find("self.lifecycle.authorize_ready(")
     assert start_idx > 0 and auth_idx > 0 and start_idx < auth_idx
@@ -100,19 +102,13 @@ def test_stream_health_fresh_and_stale() -> None:
     h = StreamHealth(connected=True, last_message_ts=0.0)
     assert h.is_fresh(max_age_sec=15.0) is False
     import time
-
     h.last_message_ts = time.time()
     assert h.is_fresh(max_age_sec=15.0) is True
 
 
 def test_user_stream_health_token_and_terminated() -> None:
     import time
-
-    h = UserStreamHealth(
-        connected=True,
-        terminated=False,
-        token_expires_at_ms=int(time.time() * 1000) + 60_000,
-    )
+    h = UserStreamHealth(connected=True, terminated=False, token_expires_at_ms=int(time.time() * 1000) + 60_000)
     assert h.token_valid() is True
     assert h.is_healthy() is True
     h.terminated = True
@@ -125,14 +121,12 @@ def test_user_stream_health_token_and_terminated() -> None:
 
 def test_public_stream_subscribe_symbol_name() -> None:
     from tko.marketdata.ws_public import _symbol_stream_name
-
     assert _symbol_stream_name("BTC/USDT") == "btcusdt@ticker"
     assert _symbol_stream_name("ETH_IDR", "ticker") == "ethidr@ticker"
 
 
 def test_settings_require_streams_default_on() -> None:
     from tko.core.config import Settings
-
     s = Settings()
     assert s.require_ws_market is True
     assert s.require_user_stream is True
