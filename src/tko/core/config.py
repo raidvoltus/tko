@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     reconcile_interval_sec: float = Field(default=900.0, ge=30.0, le=86_400.0)
     heartbeat_stale_sec: float = Field(default=300.0, ge=30.0, le=86_400.0)
     market_data_max_age_sec: float = Field(default=60.0, ge=0.0, le=3600.0)
+    # P0 streams: production requires live WS + user stream (NO TRADE if unhealthy)
+    require_ws_market: bool = True
+    require_user_stream: bool = True
+    ws_startup_timeout_sec: float = Field(default=45.0, ge=5.0, le=300.0)
+    ws_stale_sec: float = Field(default=20.0, ge=5.0, le=300.0)
     watchdog_enabled: bool = True
     telegram_kill_command: bool = True
 
@@ -220,6 +225,6 @@ def load_settings() -> Settings:
     try:
         settings = Settings()
     except Exception as exc:
-        raise SettingsError(f"Failed to load settings: {exc}") from exc
+        raise SettingsError(f"Failed to load settings: {exc}") from exp
     settings.validate_for_live()
     return settings
