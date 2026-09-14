@@ -3,8 +3,8 @@
 Invariants:
 * GUI close does NOT stop Core.
 * Offline/stale heartbeat => READY=UNKNOWN (never cached READY).
-* No exchange trading from GUI; credentials only written to OS keyring via Setup.
-* Setup does not authorize trading — Core remains sole trading authority.
+* No exchange / credentials / order imports in this package.
+* Credentials only via: TKO-Core.exe setup / python -m tko setup
 """
 
 from __future__ import annotations
@@ -23,107 +23,11 @@ POLL_MS = 1500
 STALE_SEC = 5.0
 
 
-class SetupDialog(tk.Toplevel):
-    """One-shot credential entry → OS keyring only (no trading, no plaintext files)."""
-
-    def __init__(self, master: tk.Tk) -> None:
-        super().__init__(master)
-        self.title("TKO Setup — Credentials")
-        self.geometry("520x360")
-        self.resizable(False, False)
-        self.transient(master)
-        self.grab_set()
-
-        frm = ttk.Frame(self, padding=14)
-        frm.pack(fill="both", expand=True)
-
-        ttk.Label(
-            frm,
-            text="Disimpan ke OS keyring (Windows Credential Manager).\n"
-            "GUI tidak mengeksekusi order. Jalankan TKO-Core.exe run setelah setup.",
-            justify="left",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
-
-        ttk.Label(frm, text="Tokocrypto API Key").grid(row=1, column=0, sticky="w")
-        self.api_key = ttk.Entry(frm, width=48)
-        self.api_key.grid(row=1, column=1, sticky="ew", pady=4)
-
-        ttk.Label(frm, text="Tokocrypto API Secret").grid(row=2, column=0, sticky="w")
-        self.api_secret = ttk.Entry(frm, width=48, show="*")
-        self.api_secret.grid(row=2, column=1, sticky="ew", pady=4)
-
-        ttk.Separator(frm).grid(row=3, column=0, columnspan=2, sticky="ew", pady=10)
-
-        ttk.Label(frm, text="Telegram Bot Token (opsional)").grid(row=4, column=0, sticky="w")
-        self.tg_token = ttk.Entry(frm, width=48, show="*")
-        self.tg_token.grid(row=4, column=1, sticky="ew", pady=4)
-
-        ttk.Label(frm, text="Telegram Chat ID (opsional)").grid(row=5, column=0, sticky="w")
-        self.tg_chat = ttk.Entry(frm, width=48)
-        self.tg_chat.grid(row=5, column=1, sticky="ew", pady=4)
-
-        bf = ttk.Frame(frm)
-        bf.grid(row=6, column=0, columnspan=2, sticky="e", pady=(16, 0))
-        ttk.Button(bf, text="Cancel", command=self.destroy).pack(side="right", padx=4)
-        ttk.Button(bf, text="Save to keyring", command=self._save).pack(side="right", padx=4)
-
-        self.bind("<Return>", lambda _e: self._save())
-        self.api_key.focus_set()
-
-    def _save(self) -> None:
-        key = self.api_key.get().strip()
-        secret = self.api_secret.get().strip()
-        if not key or not secret:
-            messagebox.showerror("Setup", "API Key dan API Secret wajib diisi.", parent=self)
-            return
-        try:
-            from tko.core.credentials import CredentialError, save_telegram, save_tokocrypto
-
-            save_tokocrypto(key, secret)
-            tg_t = self.tg_token.get().strip()
-            tg_c = self.tg_chat.get().strip()
-            if tg_t or tg_c:
-                if not tg_t or not tg_c:
-                    messagebox.showerror(
-                        "Setup",
-                        "Telegram: isi Bot Token dan Chat ID keduanya, atau kosongkan keduanya.",
-                        parent=self,
-                    )
-                    return
-                save_telegram(tg_t, tg_c)
-        except CredentialError as exc:
-            messagebox.showerror("Setup gagal", str(exc), parent=self)
-            return
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Setup gagal", f"Keyring error: {exc}", parent=self)
-            return
-
-        try:
-            from tko.ipc.protocol import default_token_path, ensure_token
-
-            path = default_token_path()
-            ensure_token(path)
-            token_msg = f"\nIPC token: {path}"
-        except Exception as exc:  # noqa: BLE001
-            token_msg = f"\nIPC token belum dibuat: {exc}"
-
-        messagebox.showinfo(
-            "Setup OK",
-            "Kredensial tersimpan di keyring."
-            + token_msg
-            + "\n\nLangkah berikutnya:\n"
-            "1. Jalankan TKO-Core.exe run (biarkan tetap terbuka)\n"
-            "2. Buka GUI lagi — status harus CONNECTED",
-            parent=self,
-        )
-        self.destroy()
-
-
 class TKOControlApp:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("TKO Control")
-        self.root.geometry("760x540")
+        self.root.geometry("740x500")
         self.client = IPCClient()
         self.last_hb = 0.0
         self._build()
@@ -154,19 +58,14 @@ class TKOControlApp:
             ttk.Label(f, textvariable=self.vars[lab]).grid(row=i, column=1, sticky="w", columnspan=3)
         bf = ttk.Frame(f)
         bf.grid(row=len(labels) + 2, column=0, columnspan=4, sticky="ew", pady=(16, 0))
-        ttk.Button(bf, text="SETUP", command=self._open_setup).pack(side="left", padx=4)
         for txt, cmd in (("STOP", "stop"), ("KILL", "kill"), ("STATUS", "status")):
             ttk.Button(bf, text=txt, command=lambda c=cmd: self._send(c)).pack(side="left", padx=4)
         note = ttk.Label(
             f,
-            text="SETUP = keyring only (bukan trading). Closing GUI does not stop Core.\n"
-            "Token IPC: %PROGRAMDATA%\\TKO\\ipc.token (bukan Program Files).",
+            text="Closing this window does not stop Core. Setup credentials via: python -m tko setup",
             foreground="#555",
         )
         note.grid(row=len(labels) + 3, column=0, columnspan=4, sticky="w", pady=(12, 0))
-
-    def _open_setup(self) -> None:
-        SetupDialog(self.root)
 
     def _poll(self) -> None:
         def worker() -> None:
