@@ -43,7 +43,7 @@ def _read_secret(prompt: str, *, allow_visible: bool = True) -> str:
     print("  [karakter disembunyikan — ketik lalu Enter; paste: klik kanan]")
     try:
         value = getpass("").strip()
-    except Exception:
+    except Exception:  # noqa: BLE001
         value = ""
     if value:
         return value
@@ -56,12 +56,12 @@ def _read_secret(prompt: str, *, allow_visible: bool = True) -> str:
 def cmd_setup(_: argparse.Namespace) -> int:
     print("=== TKO Credential Setup (Tokocrypto LIVE) ===")
     print("Kredensial disimpan di OS keyring (fail-closed).")
-    print("")
+    print()
     print("Catatan Secret Key:")
     print("  - Saat ketik, karakter TIDAK muncul (bukan error).")
     print("  - Ketik secret lengkap, lalu tekan Enter.")
     print("  - Jika paste gagal: ketik manual, atau pilih mode terlihat.")
-    print("")
+    print()
     api_key = input("Tokocrypto API Key: ").strip()
     visible = input("Tampilkan Secret Key saat mengetik? [y/N]: ").strip().lower() in ("y", "yes")
     if visible:
