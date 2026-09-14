@@ -1,0 +1,4 @@
+Built for CI/EXE tracking.
+Repo: raidvoltus/tko
+Code HEAD target for this rebuild trigger: 13dfd5c3cc29fced8a957bda46ecdd7c2d958541
+Credentials are NEVER bundled.
