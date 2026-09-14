@@ -46,10 +46,12 @@ class Settings(BaseSettings):
     ema_slow: int = Field(default=21, ge=2, le=500)
     ohlcv_timeframe: str = "15m"
     ohlcv_limit: int = Field(default=100, ge=20, le=1000)
+    # Stage 5 ML foundation (optional; default OFF — rule-based remains primary)
     ml_filter_enabled: bool = False
     ml_min_confidence: float = Field(default=0.55, ge=0.5, le=0.99)
     ml_model_path: str = ""
     ohlcv_store_enabled: bool = True
+    # Stage 5.1 diversity / pool / ensemble / governor (default OFF)
     ml_governor_enabled: bool = False
     ml_profile: str = "ULTRA_LITE"
     ml_pool_max_models: int = Field(default=5, ge=1, le=7)
@@ -81,6 +83,7 @@ class Settings(BaseSettings):
     reconcile_interval_sec: float = Field(default=900.0, ge=30.0, le=86_400.0)
     heartbeat_stale_sec: float = Field(default=300.0, ge=30.0, le=86_400.0)
     market_data_max_age_sec: float = Field(default=60.0, ge=0.0, le=3600.0)
+    # P0 streams: production requires live WS + user stream (NO TRADE if unhealthy)
     require_ws_market: bool = True
     require_user_stream: bool = True
     ws_startup_timeout_sec: float = Field(default=45.0, ge=5.0, le=300.0)
@@ -222,6 +225,6 @@ def load_settings() -> Settings:
     try:
         settings = Settings()
     except Exception as exc:
-        raise SettingsError(f"Failed to load settings: {exc}") from exp
+        raise SettingsError(f"Failed to load settings: {exc}") from exc
     settings.validate_for_live()
     return settings
