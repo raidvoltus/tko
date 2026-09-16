@@ -3,7 +3,9 @@ import os
 import tempfile
 
 import numpy as np
+import pytest
 
+sklearn = pytest.importorskip("sklearn")
 from src.ml.sklearn_model import SklearnModel
 
 

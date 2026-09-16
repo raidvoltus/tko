@@ -38,6 +38,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest ruff
           python -m ruff check src tests main.py
+          $env:PYTHONPATH = (Get-Location).Path
           $env:TKO_IPC_DIR = Join-Path $env:TEMP ("mx_" + [guid]::NewGuid().ToString("N"))
           python -m pytest -q --tb=line
       - name: Locale note

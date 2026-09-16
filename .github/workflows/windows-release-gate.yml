@@ -27,6 +27,7 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pytest ruff
           python -m ruff check src tests main.py
+          $env:PYTHONPATH = (Get-Location).Path
           $env:TKO_IPC_DIR = Join-Path $env:TEMP ("gate_" + [guid]::NewGuid().ToString("N"))
           python -m pytest -q --tb=line
       - name: Notes
