@@ -78,25 +78,26 @@ jobs:
         shell: pwsh
         run: |
           Set-Location $env:GITHUB_WORKSPACE
-          & "$env:GITHUB_WORKSPACE\scripts\build_windows_release.ps1" -Clean
+          $env:PYTHONPATH = $env:GITHUB_WORKSPACE
+          & "$env:GITHUB_WORKSPACE\scripts\build_windows_release.ps1" -Clean -SourceRoot $env:GITHUB_WORKSPACE -DistDir (Join-Path $env:GITHUB_WORKSPACE "dist")
           if ($LASTEXITCODE -ne 0) { throw "build failed exit=$LASTEXITCODE" }
+          $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
+          Write-Host "Post-build dist:"
+          Get-ChildItem $dist -Force -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+          if (-not (Test-Path (Join-Path $dist "TKO-Core.exe"))) { throw "TKO-Core.exe missing after build" }
+          if (-not (Test-Path (Join-Path $dist "TKO-GUI.exe"))) { throw "TKO-GUI.exe missing after build" }
 
-      - name: Hash manifest
+      - name: Hash manifest + dist layout
         shell: pwsh
         run: |
           Set-Location $env:GITHUB_WORKSPACE
           $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
-          & "$env:GITHUB_WORKSPACE\scripts\hash_manifest.ps1" -DistDir $dist
-          if ($LASTEXITCODE -ne 0) { throw "hash_manifest failed" }
-
-      - name: Dist layout + no bundled token
-        shell: pwsh
-        run: |
-          $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
           Write-Host "=== DIST LISTING ==="
           Write-Host "dist=$dist exists=$(Test-Path $dist)"
-          if (-not (Test-Path $dist)) { throw "dist missing" }
-          Get-ChildItem $dist | ForEach-Object { Write-Host ("  {0}  {1}" -f $_.Name, $_.Length) }
+          if (-not (Test-Path $dist)) { throw "dist missing after build" }
+          Get-ChildItem $dist -Force | ForEach-Object {
+            Write-Host ("  {0}  {1}  dir={2}" -f $_.Name, $_.Length, $_.PSIsContainer)
+          }
 
           $core = Join-Path $dist "TKO-Core.exe"
           $gui  = Join-Path $dist "TKO-GUI.exe"
@@ -104,18 +105,18 @@ jobs:
           $man  = Join-Path $dist "release-manifest.json"
 
           $fail = 0
-          foreach ($pair in @(
-            @("core_exe", $core),
-            @("gui_exe", $gui),
-            @("sha256sums", $sums),
-            @("manifest", $man)
+          foreach ($item in @(
+            @{ n = "core_exe"; p = $core },
+            @{ n = "gui_exe"; p = $gui },
+            @{ n = "sha256sums"; p = $sums },
+            @{ n = "manifest"; p = $man }
           )) {
-            $ok = Test-Path $pair[1]
-            Write-Host ("[{0}] {1} -> {2}" -f ($(if ($ok) {"PASS"} else {"FAIL"}), $pair[0], $pair[1]))
+            $ok = Test-Path -LiteralPath $item.p
+            Write-Host ("[{0}] {1} -> {2}" -f ($(if ($ok) {"PASS"} else {"FAIL"}), $item.n, $item.p))
             if (-not $ok) { $fail++ }
           }
 
-          $tokens = @(Get-ChildItem -Path $dist -Recurse -Filter "ipc.token" -ErrorAction SilentlyContinue)
+          $tokens = @(Get-ChildItem -LiteralPath $dist -Recurse -Filter "ipc.token" -ErrorAction SilentlyContinue)
           if ($tokens.Count -gt 0) {
             Write-Host "[FAIL] bundled ipc.token found"
             $fail++
@@ -124,7 +125,11 @@ jobs:
           }
 
           if ($fail -gt 0) { throw "Dist layout failed ($fail checks)" }
-          Write-Host "Dist layout OK"
+
+          # Hash manifest (explicit exit codes)
+          & "$env:GITHUB_WORKSPACE\scripts\hash_manifest.ps1" -DistDir $dist
+          if ($LASTEXITCODE -ne 0) { throw "hash_manifest failed exit=$LASTEXITCODE" }
+          Write-Host "Hash + dist layout OK"
 
       - name: Security tests
         shell: pwsh
