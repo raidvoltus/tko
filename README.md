@@ -1,3 +1,8 @@
+# Tokocrypto FULL AUTOPILOT (Windows 7 / HP 430 G1)
+
+Seven-plane architecture: Control, Data, Feature, Decision, Risk, Execution, Notification.
+Portfolio rotation with net_opportunity scoring and route optimizer.
+
 # Tokocrypto Production Trading Bot (Windows 7 Compatible)
 
 Production-grade trading bot targeting **Windows 7 SP1 64-bit** with full Risk Engine, PAPER/SHADOW/LIVE modes, ML inference (optional), Telegram trade notifications, and single-dashboard Tkinter GUI.

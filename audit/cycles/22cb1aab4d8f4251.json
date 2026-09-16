@@ -1,0 +1,51 @@
+{
+  "cycle_id": "22cb1aab4d8f4251",
+  "timestamp": 1789555376.012335,
+  "symbols_scanned": 0,
+  "portfolio_snapshot": {
+    "total_value_usdt": 100.0,
+    "assets": {
+      "USDT": 100.0
+    }
+  },
+  "signal": {
+    "action": "WAIT",
+    "probability": 0.5,
+    "regime": "RANGE",
+    "hash": "e17ca6e34e978f61"
+  },
+  "opportunity_ranking": [
+    {
+      "from": "USDT",
+      "to": "BTC",
+      "net": -0.6,
+      "route": [
+        "USDT",
+        "BTC"
+      ]
+    },
+    {
+      "from": "USDT",
+      "to": "ETH",
+      "net": -0.6,
+      "route": [
+        "USDT",
+        "ETH"
+      ]
+    }
+  ],
+  "route": {
+    "selected": null
+  },
+  "hold": true,
+  "reason": "no_edge",
+  "risk_result": {
+    "kill": false,
+    "circuit": false
+  },
+  "order_result": null,
+  "latency_ms": {
+    "total_ms": 112.05291748046875
+  },
+  "mode": "PAPER"
+}

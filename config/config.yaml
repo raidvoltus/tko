@@ -1,0 +1,77 @@
+# Tokocrypto Full Autopilot - Control Plane Config
+# Target: HP 430 G1 / i3 / 8GB / Windows 7 SP1 / CPU-only
+
+mode: PAPER  # PAPER | SHADOW | LIVE
+cycle_interval_sec: 30
+
+hardware:
+  profile: "HP430G1_i3_8GB"
+  max_symbols_scan: 40
+  candle_buffer_size: 300
+  max_open_orders: 3
+  inference_serial: true
+  single_execution_worker: true
+
+exchange:
+  name: tokocrypto
+  base_url: "https://www.tokocrypto.com"
+  ws_base: "wss://stream-cloud.tokocrypto.site/stream"
+  recv_window: 5000
+  # Only Tokocrypto for execution
+
+symbols:
+  whitelist: []          # empty = scan all tradeable
+  blacklist: []
+  min_quote_volume_usdt: 5000
+  prefer_quote: ["USDT", "IDR", "USDC"]
+
+portfolio:
+  min_edge_pct: 0.35           # minimum net opportunity % to rotate
+  min_rebalance_threshold_pct: 0.50
+  min_holding_period_sec: 300
+  cooldown_sec: 60
+  max_daily_turnover_pct: 50
+  max_position_pct: 40         # per asset of portfolio
+  max_exposure_pct: 95
+  stablecoin_defensive_pct: 30 # max park in stable when risk high
+  dust_threshold_usdt: 1.0
+
+risk:
+  max_order_value_usdt: 100
+  max_position_usdt: 500
+  max_exposure_usdt: 1000
+  max_daily_loss_usdt: 50
+  max_consecutive_losses: 5
+  min_balance_usdt: 10
+  max_stale_market_sec: 45
+  max_clock_drift_ms: 5000
+  max_drawdown_pct: 8
+  kelly_cap: 0.05
+  fail_closed: true
+
+ml:
+  enabled: true
+  require_for_live: true
+  model_dir: "models/default"
+  framework: sklearn
+  feature_version: "v1"
+  hold_if_invalid: true
+
+features:
+  use_smoothing: false
+  float_dtype: float32
+  max_feature_dim: 64
+
+telegram:
+  enabled: true
+  notify_on_signal_only: false   # only real executions
+
+gui:
+  refresh_ms: 1000
+
+paths:
+  state_dir: "state"
+  audit_dir: "audit"
+  kill_switch: "state/kill_switch.flag"
+  model_registry: "state/model_registry.json"
+  feature_flags: "state/feature_flags.json"
