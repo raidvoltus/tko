@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import logging
 import socket
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from .protocol import decode_message, encode_message, try_read_frame
-from .token import ensure_ipc_token, load_ipc_token, TokenError
 from .server import DEFAULT_HOST, DEFAULT_PORT
+from .token import ensure_ipc_token, load_ipc_token
 
 logger = logging.getLogger(__name__)
 

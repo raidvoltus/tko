@@ -1,14 +1,13 @@
 """IPC server — runs inside TKO-Core only. GUI never holds trading authority."""
 from __future__ import annotations
 
-import json
 import logging
 import socket
 import threading
 from typing import Any, Callable, Dict, Optional
 
 from .protocol import decode_message, encode_message, try_read_frame
-from .token import ensure_ipc_token, load_ipc_token, TokenError
+from .token import ensure_ipc_token, load_ipc_token
 
 logger = logging.getLogger(__name__)
 

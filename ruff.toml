@@ -1,0 +1,7 @@
+line-length = 120
+target-version = "py310"
+exclude = ["build", "dist", ".venv", "certification/out"]
+
+[lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
