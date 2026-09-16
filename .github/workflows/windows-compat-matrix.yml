@@ -1,21 +1,17 @@
-# Compatibility smoke on windows-2022 only.
-# Labels (win10/win11 builds) are documentation tags — GitHub-hosted runners share windows-2022 image.
-# True multi-OS matrix requires self-hosted or external VMs (Level C).
 name: windows-compat-matrix
 
 on:
-  workflow_dispatch:
   push:
     branches: [main]
-    paths:
-      - "src/**"
-      - "requirements.txt"
-      - "packaging/**"
-      - "scripts/**"
-      - ".github/workflows/windows-compat-matrix.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+  PYTHONUTF8: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
 
 jobs:
   compat:
@@ -26,6 +22,7 @@ jobs:
         python-version: ["3.11"]
     runs-on: windows-2022
     name: "windows-2022 · ${{ matrix.locale }} · py${{ matrix.python-version }}"
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,11 +35,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest ruff
           python -m ruff check src tests main.py
-          $env:PYTHONPATH = (Get-Location).Path
           $env:TKO_IPC_DIR = Join-Path $env:TEMP ("mx_" + [guid]::NewGuid().ToString("N"))
-          python -m pytest -q --tb=line
+          python -m pytest
       - name: Locale note
         shell: pwsh
         run: |
-          Write-Host "Locale tag: ${{ matrix.locale }} (culture set for process where supported)"
+          Write-Host "Locale tag: ${{ matrix.locale }}"
           try { Set-Culture ${{ matrix.locale }} } catch { Write-Host "Set-Culture limited on runner" }

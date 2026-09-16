@@ -1,13 +1,19 @@
 name: windows-release-gate
 
 on:
-  pull_request:
-    branches: [main]
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+  PYTHONUTF8: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
 
 jobs:
   windows-release-gate:
@@ -23,17 +29,16 @@ jobs:
       - name: Install + Ruff + Pytest
         shell: pwsh
         run: |
+          Write-Host "PYTHONPATH=$env:PYTHONPATH"
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install pytest ruff
           python -m ruff check src tests main.py
-          $env:PYTHONPATH = (Get-Location).Path
           $env:TKO_IPC_DIR = Join-Path $env:TEMP ("gate_" + [guid]::NewGuid().ToString("N"))
-          python -m pytest -q --tb=line
+          python -m pytest
       - name: Notes
         shell: pwsh
         run: |
-          Write-Host "Full EXE: workflow windows-release-certification"
+          Write-Host "Full EXE: windows-release-certification"
           Write-Host "WACK: NOT APPLICABLE"
-          Write-Host "Signing: BLOCKED until Trusted Signing configured"
-          Write-Host "Not Microsoft Store certification"
+          Write-Host "Signing: BLOCKED until configured"

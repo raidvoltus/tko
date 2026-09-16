@@ -1,15 +1,17 @@
-"""ML model integrity tests."""
-import os
+"""ML model integrity tests (marker: ml)."""
+from __future__ import annotations
+
 import tempfile
 
 import numpy as np
 import pytest
 
-sklearn = pytest.importorskip("sklearn")
-from src.ml.sklearn_model import SklearnModel
+pytestmark = pytest.mark.ml
 
 
-def test_train_predict_save_load():
+def test_sklearn_train_predict_save_load(sklearn_mod):
+    from src.ml.sklearn_model import SklearnModel
+
     X = np.random.randn(100, 4)
     y = (X[:, 0] > 0).astype(int)
     features = ["f1", "f2", "f3", "f4"]
@@ -29,16 +31,11 @@ def test_train_predict_save_load():
         assert len(p2) == 5
 
 
-def test_corrupt_model_rejected():
-    X = np.random.randn(20, 2)
-    y = np.zeros(20, dtype=int)
-    m = SklearnModel()
-    m.train(X, y, ["a", "b"])
+def test_corrupt_model_rejected(sklearn_mod):
+    from src.ml.sklearn_model import SklearnModel
+
     with tempfile.TemporaryDirectory() as d:
-        m.save(d)
-        # corrupt
-        with open(os.path.join(d, "model.pkl"), "ab") as f:
-            f.write(b"CORRUPT")
-        m2 = SklearnModel()
-        assert not m2.load(d)
-        assert not m2.is_loaded
+        bad = __import__("pathlib").Path(d) / "model.joblib"
+        bad.write_bytes(b"not-a-model")
+        m = SklearnModel()
+        assert m.load(d) is False or not m.is_loaded

@@ -1,18 +1,21 @@
-# TKO Level A + Level B Windows certification (windows-2022)
-# Internal certification only — NOT Microsoft Store certification.
 name: windows-release-certification
 
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write  # for future OIDC Trusted Signing / attestations
+  id-token: write
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+  PYTHONUTF8: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
   windows-release-certification:
@@ -21,8 +24,7 @@ jobs:
     timeout-minutes: 75
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Source integrity
         shell: pwsh
@@ -31,11 +33,18 @@ jobs:
           git log -1 --oneline
           if (git status --porcelain) { throw "Dirty tree" }
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
+
+      - name: Sanity PYTHONPATH
+        shell: pwsh
+        run: |
+          Write-Host "PYTHONPATH=$env:PYTHONPATH"
+          Write-Host "GITHUB_WORKSPACE=$env:GITHUB_WORKSPACE"
+          python -c "import sys,os; print(sys.path[:3]); print(os.environ.get('PYTHONPATH'))"
+          python -c "import src; print('src import OK', src)"
 
       - name: Install dependencies
         shell: pwsh
@@ -51,9 +60,8 @@ jobs:
       - name: Pytest
         shell: pwsh
         run: |
-          $env:PYTHONPATH = (Get-Location).Path
           $env:TKO_IPC_DIR = Join-Path $env:TEMP ("tko_ipc_" + [guid]::NewGuid().ToString("N"))
-          python -m pytest -q --tb=line
+          python -m pytest
 
       - name: Static order authority audit
         shell: pwsh
@@ -78,27 +86,25 @@ jobs:
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts/windows_install_test.ps1
 
-      - name: Security tests (IPC unit + dist scan)
+      - name: Security tests
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts/windows_security_test.ps1
 
-      - name: WACK marker (NOT APPLICABLE)
+      - name: WACK marker
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts/windows_wack.ps1
 
-      - name: EXE smoke (Core + GUI + IPC bootstrap)
+      - name: EXE smoke
         shell: pwsh
         env:
           TKO_CERT_FRESH_TOKEN: "1"
         run: powershell -ExecutionPolicy Bypass -File scripts/windows_smoke_test.ps1
 
-      - name: Code signing status
+      - name: Signing status
         shell: pwsh
-        run: |
-          Write-Host "L4.signing: BLOCKED — PRODUCTION CODE SIGNING NOT CONFIGURED"
-          Write-Host "Configure Azure Trusted Signing secrets to enable scripts/windows_sign.ps1"
+        run: Write-Host "L4.signing BLOCKED until Azure Trusted Signing secrets configured"
 
-      - name: Upload Windows artifacts
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
