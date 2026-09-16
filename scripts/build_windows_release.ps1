@@ -106,3 +106,8 @@ $manifest | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $DistDir "release-m
 Write-Host "Build complete."
 Write-Host "  $core ($coreSha)"
 Write-Host "  $gui ($guiSha)"
+Write-Host "Dist listing:"
+Get-ChildItem $DistDir | ForEach-Object { Write-Host ("  {0} {1}" -f $_.Name, $_.Length) }
+if (-not (Test-Path $core)) { Write-Error "core missing after build"; exit 1 }
+if (-not (Test-Path $gui)) { Write-Error "gui missing after build"; exit 1 }
+exit 0

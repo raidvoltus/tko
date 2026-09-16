@@ -1,16 +1,17 @@
 #Requires -Version 5.1
-<#
-.SYNOPSIS
-  Start TKO-Core.exe, wait for IPC token, start GUI briefly, stop processes.
-  PAPER-oriented — does not send LIVE exchange orders.
-#>
 param(
-    [string]$DistDir = (Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..")).Path "dist"),
+    [string]$DistDir = "",
     [int]$CoreWaitSec = 8,
     [int]$GuiWaitSec = 5
 )
-
 $ErrorActionPreference = "Stop"
+if (-not $DistDir) {
+    if ($env:GITHUB_WORKSPACE) { $DistDir = Join-Path $env:GITHUB_WORKSPACE "dist" }
+    elseif ($PSScriptRoot) { $DistDir = Join-Path (Split-Path $PSScriptRoot -Parent) "dist" }
+    else { $DistDir = Join-Path (Get-Location) "dist" }
+}
+$DistDir = [System.IO.Path]::GetFullPath($DistDir)
+Write-Host "Smoke DistDir=$DistDir"
 $core = Join-Path $DistDir "TKO-Core.exe"
 $gui = Join-Path $DistDir "TKO-GUI.exe"
 $tokenPath = Join-Path $env:ProgramData "TKO\ipc.token"
@@ -24,10 +25,9 @@ function Add-Result($id, $status, $evidence) {
     Write-Host "[$status] $id — $evidence"
 }
 
-# Optional: remove only test token if env TKO_CERT_FRESH_TOKEN=1
 if ($env:TKO_CERT_FRESH_TOKEN -eq "1") {
     if (Test-Path $tokenPath) {
-        Remove-Item -Force $tokenPath
+        Remove-Item -Force $tokenPath -ErrorAction SilentlyContinue
         Write-Host "Removed existing test token for fresh bootstrap"
     }
 }
@@ -65,7 +65,6 @@ try {
     Add-Result "gui_start" "FAIL" $_.Exception.Message
 }
 
-# Shutdown
 if ($guiProc -and -not $guiProc.HasExited) { Stop-Process -Id $guiProc.Id -Force -ErrorAction SilentlyContinue }
 if ($coreProc -and -not $coreProc.HasExited) { Stop-Process -Id $coreProc.Id -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 1

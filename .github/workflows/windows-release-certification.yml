@@ -44,7 +44,7 @@ jobs:
           Write-Host "PYTHONPATH=$env:PYTHONPATH"
           Write-Host "GITHUB_WORKSPACE=$env:GITHUB_WORKSPACE"
           python -c "import sys,os; print(sys.path[:3]); print(os.environ.get('PYTHONPATH'))"
-          python -c "import src; print('src import OK', src)"
+          python -c "import src; print('src import OK')"
 
       - name: Install dependencies
         shell: pwsh
@@ -76,33 +76,76 @@ jobs:
 
       - name: Clean PyInstaller build
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File scripts/build_windows_release.ps1 -Clean
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          & "$env:GITHUB_WORKSPACE\scripts\build_windows_release.ps1" -Clean
+          if ($LASTEXITCODE -ne 0) { throw "build failed exit=$LASTEXITCODE" }
 
       - name: Hash manifest
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File scripts/hash_manifest.ps1 -DistDir dist
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
+          & "$env:GITHUB_WORKSPACE\scripts\hash_manifest.ps1" -DistDir $dist
+          if ($LASTEXITCODE -ne 0) { throw "hash_manifest failed" }
 
       - name: Dist layout + no bundled token
         shell: pwsh
         run: |
           $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
-          Write-Host "Checking dist at $dist"
-          Get-ChildItem $dist -ErrorAction SilentlyContinue | Format-Table Name,Length
-          powershell -ExecutionPolicy Bypass -File scripts/windows_install_test.ps1 -DistDir $dist
+          Write-Host "=== DIST LISTING ==="
+          Write-Host "dist=$dist exists=$(Test-Path $dist)"
+          if (-not (Test-Path $dist)) { throw "dist missing" }
+          Get-ChildItem $dist | ForEach-Object { Write-Host ("  {0}  {1}" -f $_.Name, $_.Length) }
+
+          $core = Join-Path $dist "TKO-Core.exe"
+          $gui  = Join-Path $dist "TKO-GUI.exe"
+          $sums = Join-Path $dist "SHA256SUMS"
+          $man  = Join-Path $dist "release-manifest.json"
+
+          $fail = 0
+          foreach ($pair in @(
+            @("core_exe", $core),
+            @("gui_exe", $gui),
+            @("sha256sums", $sums),
+            @("manifest", $man)
+          )) {
+            $ok = Test-Path $pair[1]
+            Write-Host ("[{0}] {1} -> {2}" -f ($(if ($ok) {"PASS"} else {"FAIL"}), $pair[0], $pair[1]))
+            if (-not $ok) { $fail++ }
+          }
+
+          $tokens = @(Get-ChildItem -Path $dist -Recurse -Filter "ipc.token" -ErrorAction SilentlyContinue)
+          if ($tokens.Count -gt 0) {
+            Write-Host "[FAIL] bundled ipc.token found"
+            $fail++
+          } else {
+            Write-Host "[PASS] no_bundled_ipc_token"
+          }
+
+          if ($fail -gt 0) { throw "Dist layout failed ($fail checks)" }
+          Write-Host "Dist layout OK"
 
       - name: Security tests
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File scripts/windows_security_test.ps1
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          & "$env:GITHUB_WORKSPACE\scripts\windows_security_test.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "security tests failed" }
 
       - name: WACK marker
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File scripts/windows_wack.ps1
+        run: |
+          & "$env:GITHUB_WORKSPACE\scripts\windows_wack.ps1"
 
       - name: EXE smoke
         shell: pwsh
         env:
           TKO_CERT_FRESH_TOKEN: "1"
-        run: powershell -ExecutionPolicy Bypass -File scripts/windows_smoke_test.ps1
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          & "$env:GITHUB_WORKSPACE\scripts\windows_smoke_test.ps1" -DistDir (Join-Path $env:GITHUB_WORKSPACE "dist")
+          if ($LASTEXITCODE -ne 0) { throw "smoke failed" }
 
       - name: Signing status
         shell: pwsh
