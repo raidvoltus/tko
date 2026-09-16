@@ -45,3 +45,5 @@ freezegun==1.1.0
 # - TensorFlow / PyTorch (modern builds require Win10+)
 # - LightGBM / CatBoost (binary compatibility not verified for Win7)
 # - any package requiring Windows 10+ APIs or VS2019+ runtime that breaks on Win7
+
+# LEGACY — Windows 7 no longer supported. Use requirements.txt for Win10+.

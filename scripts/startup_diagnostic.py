@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Startup diagnostic for Windows 7 environment."""
+"""Startup diagnostic — Windows 10+ / Linux."""
 from __future__ import annotations
 
 import platform
@@ -7,7 +7,7 @@ import sys
 import importlib
 
 
-def check(name, min_version=None):
+def check(name):
     try:
         m = importlib.import_module(name)
         ver = getattr(m, "__version__", "?")
@@ -20,30 +20,23 @@ def check(name, min_version=None):
 
 def main():
     print("=" * 60)
-    print("TOKOCRYPTO BOT — STARTUP DIAGNOSTIC")
+    print("TOKOCRYPTO AUTOPILOT — STARTUP DIAGNOSTIC")
     print("=" * 60)
     print(f"Python: {sys.version}")
     print(f"Platform: {platform.platform()}")
     print(f"Machine: {platform.machine()}")
-    print(f"Windows: {'Windows' in platform.system()}")
     print()
 
-    if sys.version_info[:2] != (3, 8):
-        print("[WARN] Recommended Python is 3.8.x for Windows 7")
+    if sys.version_info < (3, 10):
+        print("[WARN] Python 3.10+ recommended (3.11 preferred)")
     else:
-        print("[OK] Python 3.8.x detected")
+        print("[OK] Python >= 3.10")
 
     print("\nCore dependencies:")
     ok = True
     for pkg in [
-        "requests",
-        "urllib3",
-        "websocket",
-        "numpy",
-        "pandas",
-        "sklearn",
-        "cryptography",
-        "yaml",
+        "requests", "urllib3", "websocket", "numpy", "pandas",
+        "sklearn", "cryptography", "yaml",
     ]:
         if not check(pkg):
             ok = False
@@ -59,7 +52,7 @@ def main():
     if ok:
         print("RESULT: Core dependencies present. Bot can start.")
         return 0
-    print("RESULT: Missing dependencies. Install requirements-win7.txt")
+    print("RESULT: Missing dependencies. Run: pip install -r requirements.txt")
     return 1
 
 

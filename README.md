@@ -1,16 +1,22 @@
-# Tokocrypto FULL AUTOPILOT (Windows 7 / HP 430 G1)
+# Tokocrypto FULL AUTOPILOT
 
-Seven-plane architecture: Control, Data, Feature, Decision, Risk, Execution, Notification.
-Portfolio rotation with net_opportunity scoring and route optimizer.
+Seven-plane trading bot for **Tokocrypto only**: portfolio rotation, risk gate, PAPER/SHADOW/LIVE, ML (optional), Telegram execution alerts, Tkinter dashboard.
 
-# Tokocrypto Production Trading Bot (Windows 7 Compatible)
+**OS target: Windows 10 / Windows 11** (Linux OK).  
+**Windows 10+ is no longer a target** (legacy files kept only as archive).
 
-Production-grade trading bot targeting **Windows 7 SP1 64-bit** with full Risk Engine, PAPER/SHADOW/LIVE modes, ML inference (optional), Telegram trade notifications, and single-dashboard Tkinter GUI.
+## Quick Start (Windows 10+)
 
-## Quick Start (Windows 7)
+1. Install **Python 3.11 64-bit** (or 3.10 / 3.12)
+2. Run `scripts\install_win10.bat`
+3. Run `python main.py`
+4. Enter API Key / Secret / Telegram credentials
+5. Save → Test → Start in **PAPER** mode
 
-1. Install **Python 3.8.10 64-bit**
-2. Run `scripts\install_win7.bat`
+## Quick Start (Windows 10+)
+
+1. Install **Python 3.11 64-bit**
+2. Run `scripts\install_win10.bat`
 3. Run `python main.py`
 4. Enter API Key / Secret / Telegram credentials in the GUI
 5. Save → Test → Start in **PAPER** mode

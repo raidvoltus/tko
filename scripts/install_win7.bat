@@ -30,3 +30,5 @@ python scripts\startup_diagnostic.py
 echo.
 echo Done. Run: python main.py
 pause
+
+REM LEGACY — Windows 7 no longer supported. Use install_win10.bat

@@ -1,48 +1,27 @@
-# Windows 7 SP1 64-bit Compatibility Matrix
+# Compatibility Matrix — Windows 10+ (primary)
 
-**Target**: Windows 7 SP1 64-bit  
-**Python**: 3.8.10 (last official CPython with Win7 support)  
-**Audit date**: 2026-09-08
+**Target OS**: Windows 10 / Windows 11 (64-bit)  
+**Also OK**: modern Linux  
+**Not targeted**: Windows 7 (dropped)  
 
-| Component              | Version     | Win7 Status      | Notes                                      |
-|------------------------|-------------|------------------|--------------------------------------------|
-| CPython                | 3.8.10      | PASS             | Official installer                         |
-| requests               | 2.27.1      | PASS             | Pure Python + urllib3                      |
-| urllib3                | 1.26.15     | PASS             |                                            |
-| websocket-client       | 1.3.3       | PASS             | Pure Python                                |
-| numpy                  | 1.21.6      | PASS             | Official Win wheels for py3.8              |
-| pandas                 | 1.3.5       | PASS             |                                            |
-| scipy                  | 1.7.3       | PASS             |                                            |
-| scikit-learn           | 1.0.2       | PASS             | CPU only                                   |
-| joblib                 | 1.1.0       | PASS             |                                            |
-| xgboost                | 1.5.2       | PASS (verify)    | CPU hist; test binary on target machine    |
-| cryptography           | 3.4.8       | PASS             | Older OpenSSL binding                      |
-| PyYAML                 | 6.0         | PASS             |                                            |
-| tkinter                | stdlib      | PASS             | Included with official Windows installer   |
-| SQLite                 | stdlib      | PASS             |                                            |
-| TensorFlow             | any modern  | FAIL             | Requires Win10+                            |
-| PyTorch                | any modern  | FAIL             | Requires Win10+                            |
-| LightGBM               | recent      | UNVERIFIED       | Avoid on Win7 runtime                      |
-| CatBoost               | recent      | UNVERIFIED       | Avoid on Win7 runtime                      |
+**Python**: 3.10 – 3.12 (recommended **3.11**)  
+**Hardware**: CPU-only; no GPU required. Works on modest PCs (e.g. i3 / 8GB).
 
-## Runtime requirements
+| Component           | Version range        | Status   | Notes                          |
+|---------------------|----------------------|----------|--------------------------------|
+| CPython             | 3.10 – 3.12          | PASS     | Official installers            |
+| requests            | 2.31+                | PASS     |                                |
+| websocket-client    | 1.6+                 | PASS     |                                |
+| numpy               | 1.24 – 2.0.x         | PASS     | float32 features               |
+| pandas              | 2.0+                 | PASS     |                                |
+| scikit-learn        | 1.3+                 | PASS     | CPU inference                  |
+| xgboost             | 1.7 – 2.0.x          | PASS     | CPU hist                       |
+| cryptography        | 41+                  | PASS     |                                |
+| PyYAML              | 6.0+                 | PASS     |                                |
+| tkinter             | stdlib               | PASS     | GUI                            |
+| SQLite              | stdlib               | PASS     |                                |
 
-- No GPU required
-- No Windows 10+ APIs
-- No mandatory cloud services
-- ML inference is optional; bot runs in pure rule / PAPER mode without model
+## Legacy
 
-## Training vs Runtime
-
-- Heavy training: modern machine / Colab using `requirements-training.txt`
-- Export model package (pkl + metadata + checksum)
-- Copy to Win7 machine under `models/`
-- Bot loads for inference only
-
-## Install notes
-
-1. Install Python 3.8.10 64-bit from python.org (or archived installer).
-2. `python -m pip install --upgrade pip setuptools wheel`
-3. `pip install -r requirements-win7.txt`
-4. Run `python scripts/startup_diagnostic.py`
-5. Run `python main.py`
+`requirements-win7.txt` and `scripts/install_win7.bat` are **archived** for historical reference only.  
+They are **not** supported going forward.

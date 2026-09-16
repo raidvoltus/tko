@@ -1,5 +1,5 @@
 # Tokocrypto Full Autopilot - Control Plane Config
-# Target: HP 430 G1 / i3 / 8GB / Windows 7 SP1 / CPU-only
+# Target: HP 430 G1 / i3 / 8GB / Windows 10+ / CPU-only
 
 mode: PAPER  # PAPER | SHADOW | LIVE
 cycle_interval_sec: 30
