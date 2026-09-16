@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Tokocrypto Full Autopilot - entry point (Windows 7 / HP 430 G1 compatible)."""
+"""
+TKO unified launcher (dev).
+
+Production Windows layout:
+  TKO-Core.exe  -> src.core.entry  (IPC server + trading authority)
+  TKO-GUI.exe   -> src.gui.entry   (IPC client only)
+
+Dev convenience: run Core IPC + in-process GUI bridge (legacy single-process).
+For strict GUI/Core isolation use:
+  python -m src.core.entry
+  python -m src.gui.entry
+"""
 from __future__ import annotations
 
 import logging
@@ -18,9 +29,16 @@ logging.basicConfig(
 
 
 def main():
+    # Prefer documenting split mode; keep single-process bridge for quick PAPER testing
     from src.core.autopilot import Autopilot
     from src.gui.main_window import MainWindow
     from src.utils.secure_config import SecureConfig
+    from src.ipc.token import ensure_ipc_token
+
+    try:
+        ensure_ipc_token()
+    except Exception as e:
+        logging.warning("IPC token bootstrap: %s", e)
 
     auto = Autopilot(root=ROOT)
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -117,6 +118,13 @@ class RiskEngine:
         if clock_drift:
             blocked.append("CLOCK_DRIFT")
 
+        # reject non-finite / non-positive notionals
+        if notional is None or (isinstance(notional, float) and (math.isnan(notional) or math.isinf(notional))):
+            blocked.append("INVALID_NOTIONAL")
+        elif notional < 0:
+            blocked.append("NEGATIVE_NOTIONAL")
+        elif notional == 0:
+            blocked.append("ZERO_NOTIONAL")
         if notional > self.limits.max_order_value_usdt:
             blocked.append("MAX_ORDER_VALUE")
         if current_position_notional + notional > self.limits.max_position_usdt:
