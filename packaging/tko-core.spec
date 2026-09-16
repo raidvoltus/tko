@@ -1,27 +1,34 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Build: pyinstaller packaging/tko-core.spec
+from pathlib import Path
+import os
+
+# build_windows_release.ps1 sets cwd to repo root before invoking PyInstaller
+ROOT = Path(os.getcwd()).resolve()
+
 block_cipher = None
 a = Analysis(
-    ['../src/core/entry.py'],
-    pathex=['..'],
+    [str(ROOT / "src" / "core" / "entry.py")],
+    pathex=[str(ROOT)],
     binaries=[],
-    datas=[('../config/config.yaml', 'config')],
-    hiddenimports=['yaml', 'sklearn', 'numpy', 'websocket'],
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=['torch', 'tensorflow'],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
+    datas=[(str(ROOT / "config" / "config.yaml"), "config")],
+    hiddenimports=[
+        "yaml", "numpy", "websocket",
+        "src", "src.core", "src.core.autopilot",
+        "src.ipc", "src.ipc.server", "src.ipc.token", "src.ipc.protocol",
+        "src.risk.engine", "src.execution.manager", "src.tokocrypto.rest",
+        "src.tokocrypto.auth", "src.portfolio.rotation", "src.features.engine",
+        "src.decision.plane", "src.control.plane", "src.observability.cycle",
+        "src.telegram.notifier", "src.utils.secure_config",
+    ],
+    excludes=["torch", "tensorflow", "matplotlib", "IPython"],
     cipher=block_cipher,
     noarchive=False,
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz, a.scripts, a.binaries, a.zipfiles, a.datas, [],
-    name='TKO-Core',
+    name="TKO-Core",
     debug=False,
-    bootloader_ignore_signals=False,
     strip=False,
     upx=False,
     console=True,

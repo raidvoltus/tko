@@ -2,9 +2,6 @@
 <#
 .SYNOPSIS
   Clean build TKO-Core.exe + TKO-GUI.exe, hashes, release-manifest.json
-.NOTES
-  Run on Windows 10/11 with Python 3.11 recommended.
-  Does not delete user ProgramData or trading state.
 #>
 param(
     [switch]$Clean,
@@ -14,46 +11,67 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 Set-Location $SourceRoot
 if (-not $DistDir) { $DistDir = Join-Path $SourceRoot "dist" }
 
 function Get-GitCommit {
     try { return (git rev-parse HEAD).Trim() } catch { return "unknown" }
 }
-
 function Get-FileSha256([string]$Path) {
     return (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
 Write-Host "=== TKO Windows Release Build ==="
 Write-Host "SourceRoot: $SourceRoot"
-$commit = Get-GitCommit
-Write-Host "Commit: $commit"
-
-$status = git status --porcelain 2>$null
-if ($status) {
-    Write-Warning "Working tree is not clean — release builds should use clean checkout"
-}
+Write-Host "PYTHONPATH: $env:PYTHONPATH"
+Write-Host "Commit: $(Get-GitCommit)"
+& $Python --version
 
 if ($Clean) {
-    foreach ($d in @("build", "dist", Join-Path $SourceRoot "certification\out")) {
-        if (Test-Path $d) {
-            Write-Host "Cleaning $d"
-            Remove-Item -Recurse -Force $d
+    foreach ($d in @("build", "dist")) {
+        $p = Join-Path $SourceRoot $d
+        if (Test-Path $p) {
+            Write-Host "Cleaning $p"
+            Remove-Item -Recurse -Force $p
         }
     }
 }
 
-Write-Host "Installing dependencies..."
+New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $SourceRoot "build") | Out-Null
+
+Write-Host "Installing build deps..."
 & $Python -m pip install --upgrade pip
 & $Python -m pip install -r (Join-Path $SourceRoot "requirements.txt")
-& $Python -m pip install pyinstaller
+& $Python -m pip install "pyinstaller>=6.3,<7"
+
+# Preflight imports
+$env:PYTHONPATH = $SourceRoot
+Write-Host "Preflight import src.core.entry..."
+& $Python -c "import src.core.entry; print('core entry OK')"
+if ($LASTEXITCODE -ne 0) { throw "import src.core.entry failed" }
+Write-Host "Preflight import src.gui.entry..."
+& $Python -c "import src.gui.entry; print('gui entry OK')"
+if ($LASTEXITCODE -ne 0) { throw "import src.gui.entry failed" }
 
 Write-Host "Building TKO-Core.exe..."
-& $Python -m PyInstaller (Join-Path $SourceRoot "packaging\tko-core.spec") --noconfirm --distpath $DistDir --workpath (Join-Path $SourceRoot "build\core")
+& $Python -m PyInstaller `
+    (Join-Path $SourceRoot "packaging\tko-core.spec") `
+    --noconfirm --clean `
+    --distpath $DistDir `
+    --workpath (Join-Path $SourceRoot "build\core") `
+   
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller Core failed exit=$LASTEXITCODE" }
 
 Write-Host "Building TKO-GUI.exe..."
-& $Python -m PyInstaller (Join-Path $SourceRoot "packaging\tko-gui.spec") --noconfirm --distpath $DistDir --workpath (Join-Path $SourceRoot "build\gui")
+& $Python -m PyInstaller `
+    (Join-Path $SourceRoot "packaging\tko-gui.spec") `
+    --noconfirm --clean `
+    --distpath $DistDir `
+    --workpath (Join-Path $SourceRoot "build\gui") `
+   
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller GUI failed exit=$LASTEXITCODE" }
 
 $core = Join-Path $DistDir "TKO-Core.exe"
 $gui = Join-Path $DistDir "TKO-GUI.exe"
@@ -62,34 +80,29 @@ if (-not (Test-Path $gui)) { throw "Missing $gui" }
 
 $coreSha = Get-FileSha256 $core
 $guiSha = Get-FileSha256 $gui
-$coreSize = (Get-Item $core).Length
-$guiSize = (Get-Item $gui).Length
-
-$sums = Join-Path $DistDir "SHA256SUMS"
 @"
 $coreSha  TKO-Core.exe
 $guiSha  TKO-GUI.exe
-"@ | Set-Content -Path $sums -Encoding ascii
+"@ | Set-Content -Path (Join-Path $DistDir "SHA256SUMS") -Encoding ascii
 
+$commit = Get-GitCommit
 $pyVer = & $Python --version 2>&1
 $manifest = [ordered]@{
-    product           = "TKO"
-    version           = "0.1.0"
-    commit            = $commit
-    build_timestamp   = (Get-Date).ToUniversalTime().ToString("o")
-    os                = [System.Environment]::OSVersion.VersionString
-    architecture      = $env:PROCESSOR_ARCHITECTURE
-    python_build      = "$pyVer"
-    artifacts         = @(
-        @{ filename = "TKO-Core.exe"; sha256 = $coreSha; size = $coreSize }
-        @{ filename = "TKO-GUI.exe";  sha256 = $guiSha;  size = $guiSize }
+    product = "TKO"
+    version = "0.1.0"
+    commit = $commit
+    build_timestamp = (Get-Date).ToUniversalTime().ToString("o")
+    os = [System.Environment]::OSVersion.VersionString
+    architecture = $env:PROCESSOR_ARCHITECTURE
+    python_build = "$pyVer"
+    artifacts = @(
+        @{ filename = "TKO-Core.exe"; sha256 = $coreSha; size = (Get-Item $core).Length }
+        @{ filename = "TKO-GUI.exe"; sha256 = $guiSha; size = (Get-Item $gui).Length }
     )
-    signing           = @{ status = "NOT_CONFIGURED" }
+    signing = @{ status = "NOT_CONFIGURED" }
 }
-$manifestPath = Join-Path $DistDir "release-manifest.json"
-$manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding utf8
+$manifest | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $DistDir "release-manifest.json") -Encoding utf8
 
 Write-Host "Build complete."
 Write-Host "  $core ($coreSha)"
 Write-Host "  $gui ($guiSha)"
-Write-Host "  $manifestPath"
