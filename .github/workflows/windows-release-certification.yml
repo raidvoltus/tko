@@ -84,7 +84,11 @@ jobs:
 
       - name: Dist layout + no bundled token
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File scripts/windows_install_test.ps1
+        run: |
+          $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
+          Write-Host "Checking dist at $dist"
+          Get-ChildItem $dist -ErrorAction SilentlyContinue | Format-Table Name,Length
+          powershell -ExecutionPolicy Bypass -File scripts/windows_install_test.ps1 -DistDir $dist
 
       - name: Security tests
         shell: pwsh

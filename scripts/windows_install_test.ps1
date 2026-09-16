@@ -1,29 +1,59 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Portable distribution checks (no MSI). Verifies dist layout and ProgramData bootstrap path.
+  Portable distribution checks (no MSI). Verifies dist layout.
 #>
 param(
-    [string]$DistDir = (Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..")).Path "dist")
+    [string]$DistDir = ""
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $failed = 0
-function Check($name, $cond, $evidence) {
+
+# Resolve dist directory robustly (GHA + local)
+if (-not $DistDir -or $DistDir -eq "") {
+    if ($env:GITHUB_WORKSPACE) {
+        $DistDir = Join-Path $env:GITHUB_WORKSPACE "dist"
+    } elseif ($PSScriptRoot) {
+        $DistDir = Join-Path (Split-Path $PSScriptRoot -Parent) "dist"
+    } else {
+        $DistDir = Join-Path (Get-Location).Path "dist"
+    }
+}
+$DistDir = [System.IO.Path]::GetFullPath($DistDir)
+Write-Host "DistDir=$DistDir"
+Write-Host "Exists=$(Test-Path $DistDir)"
+if (Test-Path $DistDir) {
+    Write-Host "Contents:"
+    Get-ChildItem $DistDir -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
+} else {
+    Write-Host "[FAIL] dist directory missing"
+    exit 1
+}
+
+function Check([string]$name, [bool]$cond, [string]$evidence) {
     if ($cond) { Write-Host "[PASS] $name — $evidence" }
     else { Write-Host "[FAIL] $name — $evidence"; $script:failed++ }
 }
 
-Check "core_exe" (Test-Path (Join-Path $DistDir "TKO-Core.exe")) "TKO-Core.exe"
-Check "gui_exe" (Test-Path (Join-Path $DistDir "TKO-GUI.exe")) "TKO-GUI.exe"
-Check "sha256sums" (Test-Path (Join-Path $DistDir "SHA256SUMS")) "SHA256SUMS"
-Check "manifest" (Test-Path (Join-Path $DistDir "release-manifest.json")) "release-manifest.json"
-Check "programdata_writable" ($env:ProgramData -ne $null) "PROGRAMDATA=$env:ProgramData"
+$core = Join-Path $DistDir "TKO-Core.exe"
+$gui = Join-Path $DistDir "TKO-GUI.exe"
+$sums = Join-Path $DistDir "SHA256SUMS"
+$manifest = Join-Path $DistDir "release-manifest.json"
+
+Check "core_exe" (Test-Path $core) "TKO-Core.exe at $core"
+Check "gui_exe" (Test-Path $gui) "TKO-GUI.exe at $gui"
+Check "sha256sums" (Test-Path $sums) "SHA256SUMS"
+Check "manifest" (Test-Path $manifest) "release-manifest.json"
+Check "programdata_writable" (-not [string]::IsNullOrEmpty($env:ProgramData)) "PROGRAMDATA=$env:ProgramData"
 Check "msi_na" $true "Portable EXE — MSI install NOT APPLICABLE"
 
-# Ensure we never ship ipc.token inside dist
-$bad = Get-ChildItem -Path $DistDir -Recurse -Filter "ipc.token" -ErrorAction SilentlyContinue
-Check "no_bundled_ipc_token" ($null -eq $bad -or $bad.Count -eq 0) "no ipc.token under dist"
+$bad = @(Get-ChildItem -Path $DistDir -Recurse -Filter "ipc.token" -ErrorAction SilentlyContinue)
+Check "no_bundled_ipc_token" ($bad.Count -eq 0) "ipc.token count=$($bad.Count)"
 
-if ($failed -gt 0) { exit 1 }
+if ($failed -gt 0) {
+    Write-Host "FAILED checks: $failed"
+    exit 1
+}
+Write-Host "All dist layout checks passed."
 exit 0
