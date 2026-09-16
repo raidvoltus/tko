@@ -1,7 +1,5 @@
-# TKO Level A + Level B Windows certification (GitHub-hosted windows-2022)
-# Does NOT equal Microsoft Store certification.
-# Level C clean-VM physical checks remain operator/manual or self-hosted.
-
+# TKO Level A + Level B Windows certification (windows-2022)
+# Internal certification only — NOT Microsoft Store certification.
 name: windows-release-certification
 
 on:
@@ -11,20 +9,16 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      smoke:
-        description: "Run EXE smoke test"
-        type: boolean
-        default: true
 
 permissions:
   contents: read
+  id-token: write  # for future OIDC Trusted Signing / attestations
 
 jobs:
   windows-release-certification:
     name: windows-release-certification
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 75
 
     steps:
       - name: Checkout
@@ -34,14 +28,14 @@ jobs:
         shell: pwsh
         run: |
           git rev-parse HEAD
-          git status --porcelain
           git log -1 --oneline
-          if (git status --porcelain) { Write-Error "Dirty tree"; exit 1 }
+          if (git status --porcelain) { throw "Dirty tree" }
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: Install dependencies
         shell: pwsh
@@ -52,7 +46,7 @@ jobs:
 
       - name: Ruff
         shell: pwsh
-        run: python -m ruff check .
+        run: python -m ruff check src tests main.py
 
       - name: Pytest
         shell: pwsh
@@ -63,23 +57,21 @@ jobs:
       - name: Static order authority audit
         shell: pwsh
         run: |
-          python -c @"
-          from pathlib import Path
-          sites = []
+          python -c "from pathlib import Path; sites=[]
           for p in Path('src').rglob('*.py'):
-              for i,l in enumerate(p.read_text(encoding='utf-8', errors='ignore').splitlines(),1):
-                  if 'new_order' in l:
-                      sites.append(f'{p}:{i}:{l.strip()}')
-          print('\n'.join(sites))
-          # Only rest definition + execution manager call + reject in entry allowed
-          assert any('execution/manager.py' in s and 'rest.new_order' in s for s in sites)
-          assert any('tokocrypto/rest.py' in s and 'def new_order' in s for s in sites)
-          "@
+            for i,l in enumerate(p.read_text(encoding='utf-8', errors='ignore').splitlines(),1):
+              if 'new_order' in l: sites.append(f'{p}:{i}:{l.strip()}')
+          print(chr(10).join(sites))
+          assert any('execution' in s and 'manager' in s and 'rest.new_order' in s for s in sites)
+          assert any('tokocrypto' in s and 'rest' in s and 'def new_order' in s for s in sites)"
 
       - name: Clean PyInstaller build
         shell: pwsh
-        run: |
-          powershell -ExecutionPolicy Bypass -File scripts/build_windows_release.ps1 -Clean
+        run: powershell -ExecutionPolicy Bypass -File scripts/build_windows_release.ps1 -Clean
+
+      - name: Hash manifest
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/hash_manifest.ps1 -DistDir dist
 
       - name: Dist layout + no bundled token
         shell: pwsh
@@ -94,19 +86,16 @@ jobs:
         run: powershell -ExecutionPolicy Bypass -File scripts/windows_wack.ps1
 
       - name: EXE smoke (Core + GUI + IPC bootstrap)
-        if: github.event_name != 'pull_request' || inputs.smoke == true
         shell: pwsh
         env:
           TKO_CERT_FRESH_TOKEN: "1"
-        run: |
-          powershell -ExecutionPolicy Bypass -File scripts/windows_smoke_test.ps1
+        run: powershell -ExecutionPolicy Bypass -File scripts/windows_smoke_test.ps1
 
-      - name: Generate certification report
-        if: always()
+      - name: Code signing status
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts/windows_certification.ps1 -SkipBuild
-        continue-on-error: true
+          Write-Host "L4.signing: BLOCKED — PRODUCTION CODE SIGNING NOT CONFIGURED"
+          Write-Host "Configure Azure Trusted Signing secrets to enable scripts/windows_sign.ps1"
 
       - name: Upload Windows artifacts
         if: always()
@@ -121,9 +110,3 @@ jobs:
             certification/out/**
           if-no-files-found: warn
           retention-days: 14
-
-      - name: Signing status
-        shell: pwsh
-        run: |
-          Write-Host "Code signing: BLOCKED — PRODUCTION CODE SIGNING NOT CONFIGURED"
-          Write-Host "Internal certification only — not Microsoft Store certification"

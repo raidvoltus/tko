@@ -6,7 +6,7 @@ import logging
 import queue
 import threading
 import time
-from typing import Dict, Optional, Set
+from typing import Optional, Set
 
 import requests
 
@@ -99,7 +99,7 @@ class TelegramNotifier:
 
         lines = [
             f"{emoji} {event.replace('_', ' ')}",
-            f"",
+            "",
             f"Symbol: {symbol}",
             f"Quantity: {quantity}",
             f"Execution Price: {price}",

@@ -20,7 +20,6 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
     roc_auc_score,
-    confusion_matrix,
 )
 
 from .base import MLModel, ModelMetadata

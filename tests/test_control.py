@@ -1,7 +1,8 @@
 """Control plane kill switch + config hash."""
-from pathlib import Path
 import tempfile
-from src.control.plane import ControlPlane, atomic_write
+from pathlib import Path
+
+from src.control.plane import ControlPlane
 
 
 def test_kill_switch_file():

@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.execution.filters import SymbolFilters, parse_filters
+from src.execution.filters import parse_filters
 from src.execution.manager import ExecutionManager
 from src.ml.sklearn_model import SklearnModel
 from src.risk.engine import RiskEngine, RiskLimits
@@ -174,7 +174,6 @@ class AppController:
     def _on_market_msg(self, data: Dict) -> None:
         self.risk.update_market_ts(self.symbol)
         # simplified parse
-        stream = data.get("stream", "")
         payload = data.get("data") or data
         with self._lock:
             if "c" in payload:  # ticker last price

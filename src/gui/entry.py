@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import logging
 import sys
-import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
 from typing import Any, Dict
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,7 +17,7 @@ logger = logging.getLogger("tko.gui")
 class GuiIpcBridge:
     def __init__(self):
         from src.ipc.client import IpcClient
-        from src.ipc.token import ensure_ipc_token, TokenError
+        from src.ipc.token import TokenError, ensure_ipc_token
 
         try:
             ensure_ipc_token()

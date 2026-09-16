@@ -1,11 +1,11 @@
 """Order lifecycle state machine."""
 from __future__ import annotations
 
+import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
-import time
-import uuid
 
 
 class OrderState(str, Enum):

@@ -1,7 +1,5 @@
 """IPC token lifecycle tests — no hardcoded token, atomic, fail-closed."""
-import os
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -9,7 +7,6 @@ from src.ipc.token import (
     TokenError,
     ensure_ipc_token,
     load_ipc_token,
-    rotate_ipc_token,
     token_path,
 )
 
@@ -70,7 +67,7 @@ def test_concurrent_create_one_token(ipc_dir):
     results = []
 
     def worker():
-        p = ensure_ipc_token()
+        ensure_ipc_token()
         results.append(load_ipc_token())
 
     threads = [threading.Thread(target=worker) for _ in range(8)]
@@ -83,7 +80,7 @@ def test_concurrent_create_one_token(ipc_dir):
 
 
 def test_protocol_auth():
-    from src.ipc.protocol import encode_message, decode_message
+    from src.ipc.protocol import decode_message, encode_message
 
     token = "a" * 64
     frame = encode_message(token, {"cmd": "ping"})

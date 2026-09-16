@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import time
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter

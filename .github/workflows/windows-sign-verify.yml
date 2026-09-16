@@ -1,0 +1,36 @@
+# Separate required check when signing is configured.
+# Without secrets: reports BLOCKED (does not fail the job) so branches stay mergeable during setup.
+name: windows-sign-verify
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["windows-release-certification"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  windows-sign-verify:
+    name: windows-sign-verify
+    runs-on: windows-2022
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Signing gate
+        shell: pwsh
+        env:
+          TS_ENDPOINT: ${{ secrets.TS_ENDPOINT }}
+          TS_ACCOUNT: ${{ secrets.TS_ACCOUNT }}
+          TS_PROFILE: ${{ secrets.TS_PROFILE }}
+        run: |
+          if (-not $env:TS_ENDPOINT -or -not $env:TS_ACCOUNT -or -not $env:TS_PROFILE) {
+            Write-Host "BLOCKED — PRODUCTION CODE SIGNING NOT CONFIGURED"
+            Write-Host "Set secrets TS_ENDPOINT, TS_ACCOUNT, TS_PROFILE + Trusted Signing OIDC"
+            exit 0
+          }
+          Write-Host "Secrets present — download artifacts and run windows_sign_verify.ps1 in a follow-up release job"
+          exit 0

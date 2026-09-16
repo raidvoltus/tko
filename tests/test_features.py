@@ -1,7 +1,9 @@
 """Feature engine tests — no lookahead, bounded dim."""
 import time
+
 import numpy as np
-from src.features.engine import CandleBuffer, FeatureEngine, FEATURE_VERSION
+
+from src.features.engine import FEATURE_VERSION, CandleBuffer, FeatureEngine
 
 
 def test_buffer_monotonic():

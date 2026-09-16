@@ -28,13 +28,13 @@ class CandleBuffer:
         self.buffers: Dict[str, Deque[Tuple[float, float, float, float, float, float]]] = {}
         # (ts, o, h, l, c, v)
 
-    def push(self, symbol: str, ts: float, o: float, h: float, l: float, c: float, v: float) -> None:
+    def push(self, symbol: str, ts: float, o: float, h: float, low: float, c: float, v: float) -> None:
         if symbol not in self.buffers:
             self.buffers[symbol] = deque(maxlen=self.maxlen)
         buf = self.buffers[symbol]
         if buf and ts <= buf[-1][0]:
             return  # non-monotonic skip
-        buf.append((ts, o, h, l, c, v))
+        buf.append((ts, o, h, low, c, v))
 
     def closes(self, symbol: str) -> np.ndarray:
         buf = self.buffers.get(symbol)

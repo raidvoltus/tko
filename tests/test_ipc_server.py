@@ -1,11 +1,10 @@
 """IPC server/client integration on localhost."""
-import threading
 import time
 
 import pytest
 
-from src.ipc.server import IpcServer
 from src.ipc.client import IpcClient
+from src.ipc.server import IpcServer
 
 
 @pytest.fixture()

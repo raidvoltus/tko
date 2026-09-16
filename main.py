@@ -32,8 +32,8 @@ def main():
     # Prefer documenting split mode; keep single-process bridge for quick PAPER testing
     from src.core.autopilot import Autopilot
     from src.gui.main_window import MainWindow
-    from src.utils.secure_config import SecureConfig
     from src.ipc.token import ensure_ipc_token
+    from src.utils.secure_config import SecureConfig
 
     try:
         ensure_ipc_token()

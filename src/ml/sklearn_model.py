@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -9,15 +10,14 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
+    confusion_matrix,
     f1_score,
     precision_score,
     recall_score,
     roc_auc_score,
-    confusion_matrix,
 )
 
 from .base import MLModel, ModelMetadata
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 

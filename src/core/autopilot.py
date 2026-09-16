@@ -255,6 +255,7 @@ class Autopilot:
                 px = self.prices.get(plan.selected.to_asset) or self.prices.get(plan.selected.from_asset) or 1.0
                 # ensure filters exist (minimal)
                 from decimal import Decimal
+
                 from src.execution.filters import SymbolFilters
                 sym = plan.selected.symbol or primary
                 if sym not in self.exec_mgr.filters:

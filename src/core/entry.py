@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import time
 from pathlib import Path
@@ -73,7 +72,7 @@ def build_handler(auto):
 def main() -> int:
     from src.core.autopilot import Autopilot
     from src.ipc.server import IpcServer
-    from src.ipc.token import ensure_ipc_token, TokenError
+    from src.ipc.token import TokenError, ensure_ipc_token
 
     try:
         path = ensure_ipc_token()

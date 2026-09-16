@@ -1,7 +1,7 @@
 """Exchange filter / rounding tests."""
 from decimal import Decimal
 
-from src.execution.filters import SymbolFilters, normalize_order, round_step, parse_filters
+from src.execution.filters import SymbolFilters, normalize_order, round_step
 
 
 def test_round_step_down():

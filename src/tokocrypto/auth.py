@@ -4,8 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import time
-from typing import Dict, Optional, Any
-from urllib.parse import urlencode
+from typing import Any, Dict, Optional
 
 
 def generate_signature(secret: str, total_params: str) -> str:
