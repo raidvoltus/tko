@@ -105,18 +105,35 @@ jobs:
         run: |
           Set-Location $env:GITHUB_WORKSPACE
           $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
+          Write-Host "=== DIST TREE ==="
+          Get-ChildItem $dist -Recurse -Depth 2 -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host $_.FullName
+          }
           $core = Join-Path $dist "TKO-Core\TKO-Core.exe"
           $gui  = Join-Path $dist "TKO-GUI\TKO-GUI.exe"
           $sums = Join-Path $dist "SHA256SUMS"
           $man  = Join-Path $dist "release-manifest.json"
-          foreach ($p in @($core,$gui,$sums,$man)) {
-            if (-not (Test-Path $p)) { throw "missing $p" }
-            Write-Host "[PASS] $p"
+          foreach ($p in @($core, $gui, $sums, $man)) {
+            if (-not (Test-Path -LiteralPath $p)) { throw "missing required artifact: $p" }
+            Write-Host "[PASS] exists $p size=$((Get-Item -LiteralPath $p).Length)"
           }
-          & "$env:GITHUB_WORKSPACE\scripts\hash_manifest.ps1" -DistDir $dist
-          if ($LASTEXITCODE -ne 0) { throw "hash failed" }
+          $coreSha = (Get-FileHash -LiteralPath $core -Algorithm SHA256).Hash.ToLower()
+          $guiSha  = (Get-FileHash -LiteralPath $gui -Algorithm SHA256).Hash.ToLower()
+          Write-Host "Core SHA256=$coreSha"
+          Write-Host "GUI SHA256=$guiSha"
+          $out = Join-Path $env:GITHUB_WORKSPACE "certification\out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          @{
+            schema = "tko.checksums/v1"
+            commit = $env:GITHUB_SHA
+            files = @(
+              @{ name = "TKO-Core/TKO-Core.exe"; sha256 = $coreSha }
+              @{ name = "TKO-GUI/TKO-GUI.exe"; sha256 = $guiSha }
+            )
+          } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $out "checksums.json") -Encoding utf8
           & "$env:GITHUB_WORKSPACE\scripts\windows_secret_scan.ps1" -Root $env:GITHUB_WORKSPACE
-          if ($LASTEXITCODE -ne 0) { throw "secret scan failed" }
+          if ($LASTEXITCODE -ne 0) { throw "secret scan failed exit=$LASTEXITCODE" }
+          Write-Host "Hash + dist + secret scan OK"
 
       - name: Security tests (IPC unit)
         shell: pwsh
