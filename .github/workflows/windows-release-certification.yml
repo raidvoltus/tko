@@ -112,7 +112,8 @@ jobs:
 
       - name: WACK marker
         shell: pwsh
-        run: & "$env:GITHUB_WORKSPACE\scripts\windows_wack.ps1"
+        run: |
+          & "$env:GITHUB_WORKSPACE\scripts\windows_wack.ps1"
 
       - name: Actual EXE smoke (Core + GUI + IPC + restart)
         shell: pwsh
