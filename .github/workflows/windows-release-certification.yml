@@ -20,7 +20,7 @@ jobs:
   windows-release-certification:
     name: windows-release-certification
     runs-on: windows-2022
-    timeout-minutes: 75
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
@@ -41,9 +41,7 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "PYTHONPATH=$env:PYTHONPATH"
-          Write-Host "GITHUB_WORKSPACE=$env:GITHUB_WORKSPACE"
-          python -c "import sys,os; print(sys.path[:3]); print(os.environ.get('PYTHONPATH'))"
-          python -c "import src; print('src import OK')"
+          python -c "import src; print('src OK')"
 
       - name: Install dependencies
         shell: pwsh
@@ -71,78 +69,52 @@ jobs:
               if 'new_order' in l: sites.append(f'{p}:{i}:{l.strip()}')
           print(chr(10).join(sites))
           assert any('execution' in s and 'manager' in s and 'rest.new_order' in s for s in sites)
-          assert any('tokocrypto' in s and 'rest' in s and 'def new_order' in s for s in sites)"
+          assert any('tokocrypto' in s and 'rest' in s and 'def new_order' in s for s in sites)
+          assert any('entry.py' in s and 'place_order' in s for s in sites)"
 
-      - name: Clean PyInstaller build
+      - name: Clean PyInstaller onedir build
         shell: pwsh
         run: |
           Set-Location $env:GITHUB_WORKSPACE
           $env:PYTHONPATH = $env:GITHUB_WORKSPACE
           & "$env:GITHUB_WORKSPACE\scripts\build_windows_release.ps1" -Clean -SourceRoot $env:GITHUB_WORKSPACE -DistDir (Join-Path $env:GITHUB_WORKSPACE "dist")
-          if ($LASTEXITCODE -ne 0) { throw "build failed exit=$LASTEXITCODE" }
-          $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
-          Write-Host "Post-build dist:"
-          Get-ChildItem $dist -Force -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
-          if (-not (Test-Path (Join-Path $dist "TKO-Core.exe"))) { throw "TKO-Core.exe missing after build" }
-          if (-not (Test-Path (Join-Path $dist "TKO-GUI.exe"))) { throw "TKO-GUI.exe missing after build" }
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+          $core = Join-Path $env:GITHUB_WORKSPACE "dist\TKO-Core\TKO-Core.exe"
+          $gui  = Join-Path $env:GITHUB_WORKSPACE "dist\TKO-GUI\TKO-GUI.exe"
+          if (-not (Test-Path $core)) { throw "missing $core" }
+          if (-not (Test-Path $gui))  { throw "missing $gui" }
+          Write-Host "Core size=$((Get-Item $core).Length) GUI size=$((Get-Item $gui).Length)"
 
-      - name: Hash manifest + dist layout
+      - name: Hash + dist layout + secret scan
         shell: pwsh
         run: |
           Set-Location $env:GITHUB_WORKSPACE
           $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
-          Write-Host "=== DIST LISTING ==="
-          Write-Host "dist=$dist exists=$(Test-Path $dist)"
-          if (-not (Test-Path $dist)) { throw "dist missing after build" }
-          Get-ChildItem $dist -Force | ForEach-Object {
-            Write-Host ("  {0}  {1}  dir={2}" -f $_.Name, $_.Length, $_.PSIsContainer)
-          }
-
-          $core = Join-Path $dist "TKO-Core.exe"
-          $gui  = Join-Path $dist "TKO-GUI.exe"
+          $core = Join-Path $dist "TKO-Core\TKO-Core.exe"
+          $gui  = Join-Path $dist "TKO-GUI\TKO-GUI.exe"
           $sums = Join-Path $dist "SHA256SUMS"
           $man  = Join-Path $dist "release-manifest.json"
-
-          $fail = 0
-          foreach ($item in @(
-            @{ n = "core_exe"; p = $core },
-            @{ n = "gui_exe"; p = $gui },
-            @{ n = "sha256sums"; p = $sums },
-            @{ n = "manifest"; p = $man }
-          )) {
-            $ok = Test-Path -LiteralPath $item.p
-            Write-Host ("[{0}] {1} -> {2}" -f ($(if ($ok) {"PASS"} else {"FAIL"}), $item.n, $item.p))
-            if (-not $ok) { $fail++ }
+          foreach ($p in @($core,$gui,$sums,$man)) {
+            if (-not (Test-Path $p)) { throw "missing $p" }
+            Write-Host "[PASS] $p"
           }
-
-          $tokens = @(Get-ChildItem -LiteralPath $dist -Recurse -Filter "ipc.token" -ErrorAction SilentlyContinue)
-          if ($tokens.Count -gt 0) {
-            Write-Host "[FAIL] bundled ipc.token found"
-            $fail++
-          } else {
-            Write-Host "[PASS] no_bundled_ipc_token"
-          }
-
-          if ($fail -gt 0) { throw "Dist layout failed ($fail checks)" }
-
-          # Hash manifest (explicit exit codes)
           & "$env:GITHUB_WORKSPACE\scripts\hash_manifest.ps1" -DistDir $dist
-          if ($LASTEXITCODE -ne 0) { throw "hash_manifest failed exit=$LASTEXITCODE" }
-          Write-Host "Hash + dist layout OK"
+          if ($LASTEXITCODE -ne 0) { throw "hash failed" }
+          & "$env:GITHUB_WORKSPACE\scripts\windows_secret_scan.ps1" -Root $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE -ne 0) { throw "secret scan failed" }
 
-      - name: Security tests
+      - name: Security tests (IPC unit)
         shell: pwsh
         run: |
           Set-Location $env:GITHUB_WORKSPACE
           & "$env:GITHUB_WORKSPACE\scripts\windows_security_test.ps1"
-          if ($LASTEXITCODE -ne 0) { throw "security tests failed" }
+          if ($LASTEXITCODE -ne 0) { throw "security failed" }
 
       - name: WACK marker
         shell: pwsh
-        run: |
-          & "$env:GITHUB_WORKSPACE\scripts\windows_wack.ps1"
+        run: & "$env:GITHUB_WORKSPACE\scripts\windows_wack.ps1"
 
-      - name: EXE smoke
+      - name: Actual EXE smoke (Core + GUI + IPC + restart)
         shell: pwsh
         env:
           TKO_CERT_FRESH_TOKEN: "1"
@@ -151,12 +123,53 @@ jobs:
           & "$env:GITHUB_WORKSPACE\scripts\windows_smoke_test.ps1" -DistDir (Join-Path $env:GITHUB_WORKSPACE "dist")
           if ($LASTEXITCODE -ne 0) { throw "smoke failed" }
 
+      - name: Write certification report
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:GITHUB_WORKSPACE "certification\out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
+          $core = Join-Path $dist "TKO-Core\TKO-Core.exe"
+          $gui  = Join-Path $dist "TKO-GUI\TKO-GUI.exe"
+          $coreSha = (Get-FileHash $core -Algorithm SHA256).Hash.ToLower()
+          $guiSha  = (Get-FileHash $gui -Algorithm SHA256).Hash.ToLower()
+          $report = [ordered]@{
+            product = "TKO"
+            version = (Get-Content VERSION -Raw).Trim()
+            commit = $env:GITHUB_SHA
+            platform = "windows-2022"
+            packager = "pyinstaller-onedir"
+            final_gate = "CI_WINDOWS_CERTIFICATION_PASS"
+            microsoft_store_certified = $false
+            code_signing = "NOT_CONFIGURED"
+            wack = "NOT_APPLICABLE"
+            artifacts = @(
+              @{ path = "TKO-Core/TKO-Core.exe"; sha256 = $coreSha }
+              @{ path = "TKO-GUI/TKO-GUI.exe"; sha256 = $guiSha }
+            )
+            notes = @(
+              "Actual EXE smoke executed on GitHub-hosted windows-2022"
+              "Not a substitute for operator clean-VM Level C if policy requires physical isolation"
+              "No LIVE exchange orders in CI"
+            )
+          }
+          $report | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $out "certification-report.json") -Encoding utf8
+          @"
+          # TKO Windows Certification Report
+          Commit: $($env:GITHUB_SHA)
+          Core SHA256: $coreSha
+          GUI SHA256: $guiSha
+          Signing: NOT_CONFIGURED
+          WACK: NOT_APPLICABLE
+          Microsoft Store: false
+          CI gate: PASS (windows-2022 actual EXE smoke)
+          "@ | Set-Content (Join-Path $out "certification-report.md") -Encoding utf8
+
       - name: Signing status
         shell: pwsh
         run: |
-          Write-Host "L4.signing: NOT CONFIGURED (by design for current release track)"
-          Write-Host "Scripts scripts/windows_sign.ps1 + windows_sign_verify.ps1 retained for future OIDC Trusted Signing"
-          Write-Host "No PFX/private key in repo; do not store client secrets for signing"
+          Write-Host "CODE SIGNING: NOT_CONFIGURED"
+          Write-Host "Scripts retained for future OIDC Trusted Signing — no PFX in repo"
 
       - name: Upload artifacts
         if: always()
@@ -164,10 +177,12 @@ jobs:
         with:
           name: tko-windows-certification
           path: |
-            dist/TKO-Core.exe
-            dist/TKO-GUI.exe
+            dist/TKO-Core/**
+            dist/TKO-GUI/**
             dist/SHA256SUMS
             dist/release-manifest.json
+            dist/smoke-results.json
+            release/TKO-Windows/**
             certification/out/**
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 30

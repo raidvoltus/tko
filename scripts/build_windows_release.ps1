@@ -1,17 +1,22 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Clean build TKO-Core.exe + TKO-GUI.exe, hashes, release-manifest.json
+  Build onedir TKO-Core + TKO-GUI, SHA256, release-manifest.json
 #>
 param(
     [switch]$Clean,
-    [string]$SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [string]$SourceRoot = "",
     [string]$DistDir = "",
     [string]$Python = "python"
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+
+if (-not $SourceRoot) {
+    $SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+}
+if ($env:GITHUB_WORKSPACE) { $SourceRoot = $env:GITHUB_WORKSPACE }
 Set-Location $SourceRoot
 if (-not $DistDir) { $DistDir = Join-Path $SourceRoot "dist" }
 
@@ -22,92 +27,82 @@ function Get-FileSha256([string]$Path) {
     return (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
-Write-Host "=== TKO Windows Release Build ==="
-Write-Host "SourceRoot: $SourceRoot"
-Write-Host "PYTHONPATH: $env:PYTHONPATH"
-Write-Host "Commit: $(Get-GitCommit)"
+Write-Host "=== TKO Windows Release Build (onedir) ==="
+Write-Host "SourceRoot=$SourceRoot DistDir=$DistDir"
 & $Python --version
+$env:PYTHONPATH = $SourceRoot
 
 if ($Clean) {
-    foreach ($d in @("build", "dist")) {
+    foreach ($d in @("build", "dist", "release")) {
         $p = Join-Path $SourceRoot $d
-        if (Test-Path $p) {
-            Write-Host "Cleaning $p"
-            Remove-Item -Recurse -Force $p
-        }
+        if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     }
 }
-
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $SourceRoot "build") | Out-Null
 
-Write-Host "Installing build deps..."
 & $Python -m pip install --upgrade pip
 & $Python -m pip install -r (Join-Path $SourceRoot "requirements.txt")
 & $Python -m pip install "pyinstaller>=6.3,<7"
 
-# Preflight imports
-$env:PYTHONPATH = $SourceRoot
-Write-Host "Preflight import src.core.entry..."
-& $Python -c "import src.core.entry; print('core entry OK')"
-if ($LASTEXITCODE -ne 0) { throw "import src.core.entry failed" }
-Write-Host "Preflight import src.gui.entry..."
-& $Python -c "import src.gui.entry; print('gui entry OK')"
-if ($LASTEXITCODE -ne 0) { throw "import src.gui.entry failed" }
+Write-Host "Preflight imports..."
+& $Python -c "import src.core.entry; import src.gui.entry; print('import OK')"
+if ($LASTEXITCODE -ne 0) { throw "preflight import failed" }
 
-Write-Host "Building TKO-Core.exe..."
-& $Python -m PyInstaller `
-    (Join-Path $SourceRoot "packaging\tko-core.spec") `
-    --noconfirm --clean `
-    --distpath $DistDir `
-    --workpath (Join-Path $SourceRoot "build\core") `
-   
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller Core failed exit=$LASTEXITCODE" }
+Write-Host "Building TKO-Core (onedir)..."
+& $Python -m PyInstaller (Join-Path $SourceRoot "packaging\tko-core.spec") --noconfirm --clean --distpath $DistDir --workpath (Join-Path $SourceRoot "build\core")
+if ($LASTEXITCODE -ne 0) { throw "Core build failed" }
 
-Write-Host "Building TKO-GUI.exe..."
-& $Python -m PyInstaller `
-    (Join-Path $SourceRoot "packaging\tko-gui.spec") `
-    --noconfirm --clean `
-    --distpath $DistDir `
-    --workpath (Join-Path $SourceRoot "build\gui") `
-   
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller GUI failed exit=$LASTEXITCODE" }
+Write-Host "Building TKO-GUI (onedir)..."
+& $Python -m PyInstaller (Join-Path $SourceRoot "packaging\tko-gui.spec") --noconfirm --clean --distpath $DistDir --workpath (Join-Path $SourceRoot "build\gui")
+if ($LASTEXITCODE -ne 0) { throw "GUI build failed" }
 
-$core = Join-Path $DistDir "TKO-Core.exe"
-$gui = Join-Path $DistDir "TKO-GUI.exe"
+$core = Join-Path $DistDir "TKO-Core\TKO-Core.exe"
+$gui  = Join-Path $DistDir "TKO-GUI\TKO-GUI.exe"
 if (-not (Test-Path $core)) { throw "Missing $core" }
-if (-not (Test-Path $gui)) { throw "Missing $gui" }
+if (-not (Test-Path $gui))  { throw "Missing $gui" }
 
 $coreSha = Get-FileSha256 $core
-$guiSha = Get-FileSha256 $gui
+$guiSha  = Get-FileSha256 $gui
+$sums = Join-Path $DistDir "SHA256SUMS"
 @"
-$coreSha  TKO-Core.exe
-$guiSha  TKO-GUI.exe
-"@ | Set-Content -Path (Join-Path $DistDir "SHA256SUMS") -Encoding ascii
+$coreSha  TKO-Core/TKO-Core.exe
+$guiSha  TKO-GUI/TKO-GUI.exe
+"@ | Set-Content -Path $sums -Encoding ascii
 
 $commit = Get-GitCommit
+$ver = "0.1.0"
+if (Test-Path (Join-Path $SourceRoot "VERSION")) {
+    $ver = (Get-Content (Join-Path $SourceRoot "VERSION") -Raw).Trim()
+}
 $pyVer = & $Python --version 2>&1
 $manifest = [ordered]@{
     product = "TKO"
-    version = "0.1.0"
+    version = $ver
     commit = $commit
     build_timestamp = (Get-Date).ToUniversalTime().ToString("o")
     os = [System.Environment]::OSVersion.VersionString
     architecture = $env:PROCESSOR_ARCHITECTURE
     python_build = "$pyVer"
+    packager = "pyinstaller-onedir"
     artifacts = @(
-        @{ filename = "TKO-Core.exe"; sha256 = $coreSha; size = (Get-Item $core).Length }
-        @{ filename = "TKO-GUI.exe"; sha256 = $guiSha; size = (Get-Item $gui).Length }
+        @{ path = "TKO-Core/TKO-Core.exe"; sha256 = $coreSha; size = (Get-Item $core).Length }
+        @{ path = "TKO-GUI/TKO-GUI.exe";  sha256 = $guiSha;  size = (Get-Item $gui).Length }
     )
     signing = @{ status = "NOT_CONFIGURED" }
+    microsoft_store_certified = $false
 }
 $manifest | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $DistDir "release-manifest.json") -Encoding utf8
 
-Write-Host "Build complete."
+# release/ bundle layout
+$rel = Join-Path $SourceRoot "release\TKO-Windows"
+New-Item -ItemType Directory -Force -Path $rel | Out-Null
+Copy-Item -Recurse -Force (Join-Path $DistDir "TKO-Core") (Join-Path $rel "TKO-Core")
+Copy-Item -Recurse -Force (Join-Path $DistDir "TKO-GUI") (Join-Path $rel "TKO-GUI")
+Copy-Item -Force $sums (Join-Path $rel "checksums.txt")
+Copy-Item -Force (Join-Path $DistDir "release-manifest.json") (Join-Path $rel "RELEASE_MANIFEST.json")
+
+Write-Host "Build complete (onedir)."
 Write-Host "  $core ($coreSha)"
 Write-Host "  $gui ($guiSha)"
-Write-Host "Dist listing:"
-Get-ChildItem $DistDir | ForEach-Object { Write-Host ("  {0} {1}" -f $_.Name, $_.Length) }
-if (-not (Test-Path $core)) { Write-Error "core missing after build"; exit 1 }
-if (-not (Test-Path $gui)) { Write-Error "gui missing after build"; exit 1 }
+Get-ChildItem $DistDir -Force | ForEach-Object { Write-Host ("  dist/{0}" -f $_.Name) }
 exit 0

@@ -13,3 +13,8 @@ models/**/model.pkl
 *.log
 .idea/
 .vscode/
+
+dist/
+build/
+release/
+certification/out/

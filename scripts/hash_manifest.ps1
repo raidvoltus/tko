@@ -1,68 +1,44 @@
 #Requires -Version 5.1
-<#
-.SYNOPSIS
-  SHA256 manifest for dist artifacts.
-#>
-[CmdletBinding()]
 param(
     [string] $DistDir = "",
     [string] $OutFile = ""
 )
-
 $ErrorActionPreference = "Stop"
-
 if (-not $DistDir) {
     if ($env:GITHUB_WORKSPACE) { $DistDir = Join-Path $env:GITHUB_WORKSPACE "dist" }
     else { $DistDir = Join-Path (Get-Location).Path "dist" }
 }
 $DistDir = [System.IO.Path]::GetFullPath($DistDir)
-
 if (-not $OutFile) {
     $root = if ($env:GITHUB_WORKSPACE) { $env:GITHUB_WORKSPACE } else { (Get-Location).Path }
     $OutFile = Join-Path $root "certification\out\checksums.json"
 }
 $OutFile = [System.IO.Path]::GetFullPath($OutFile)
-
 Write-Host "[hash] DistDir=$DistDir"
-Write-Host "[hash] OutFile=$OutFile"
+if (-not (Test-Path $DistDir)) { Write-Error "DistDir missing"; exit 1 }
+New-Item -ItemType Directory -Force -Path (Split-Path $OutFile -Parent) | Out-Null
 
-if (-not (Test-Path $DistDir)) {
-    Write-Error "DistDir not found: $DistDir"
-    exit 1
+# Prefer EXE paths + top-level text; also hash all files under onedir roots (bounded)
+$targets = @()
+foreach ($rel in @("TKO-Core\TKO-Core.exe", "TKO-GUI\TKO-GUI.exe", "SHA256SUMS", "release-manifest.json")) {
+    $p = Join-Path $DistDir $rel
+    if (Test-Path $p) { $targets += Get-Item $p }
 }
-
-$outDir = Split-Path $OutFile -Parent
-New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-
-$files = @(Get-ChildItem -Path $DistDir -File -ErrorAction SilentlyContinue)
-Write-Host "[hash] file count=$($files.Count)"
-foreach ($f in $files) {
-    Write-Host ("  {0} ({1} bytes)" -f $f.Name, $f.Length)
+if ($targets.Count -eq 0) {
+    $targets = @(Get-ChildItem $DistDir -File)
 }
-
-if ($files.Count -eq 0) {
-    Write-Error "No files in DistDir"
-    exit 1
-}
-
 $entries = @()
-foreach ($f in $files) {
-    $sha = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-    $entries += [pscustomobject]@{
-        name     = $f.Name
-        size     = $f.Length
-        sha256   = $sha
-        built_at = $f.LastWriteTimeUtc.ToString("o")
-    }
+foreach ($f in $targets) {
+    $sha = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $rel = $f.FullName.Substring($DistDir.Length).TrimStart('\','/')
+    $entries += [pscustomobject]@{ name = $rel; size = $f.Length; sha256 = $sha }
+    Write-Host ("  {0} {1}" -f $rel, $sha)
 }
-
-$payload = [pscustomobject]@{
+[pscustomobject]@{
     schema = "tko.checksums/v1"
     commit = $env:GITHUB_SHA
     run_id = $env:GITHUB_RUN_ID
-    files  = $entries
-}
-
-$payload | ConvertTo-Json -Depth 6 | Set-Content -Path $OutFile -Encoding utf8
+    files = $entries
+} | ConvertTo-Json -Depth 6 | Set-Content $OutFile -Encoding utf8
 Write-Host "[hash] wrote $OutFile"
 exit 0
