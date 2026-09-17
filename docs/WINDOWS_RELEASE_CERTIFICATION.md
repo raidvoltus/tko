@@ -346,6 +346,17 @@ RELEASE
 
 ---
 
+
+
+### Current policy (2026-09)
+
+- **Signing not configured** on the active release track.
+- Keep `scripts/windows_sign.ps1` and `scripts/windows_sign_verify.ps1` for future use (no PFX in design).
+- GitHub Actions does **not** require `TS_*` secrets; remove unused Trusted Signing secrets from repo settings if present.
+- Do **not** grant `id-token: write` until an OIDC consumer (e.g. `azure/login`) is wired.
+- Prefer **OIDC / federated identity** over client secrets or PFX on disk when signing is enabled later.
+
+
 ## Known limitations
 
 1. Portable EXE — no MSI installer gates.

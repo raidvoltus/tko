@@ -1,5 +1,6 @@
-# Separate required check when signing is configured.
-# Without secrets: reports BLOCKED (does not fail the job) so branches stay mergeable during setup.
+# Informational only — not a production signing gate.
+# Actual signing scripts: scripts/windows_sign.ps1, scripts/windows_sign_verify.ps1
+# Future: enable Azure Trusted Signing via OIDC (no PFX / no client secret in repo).
 name: windows-sign-verify
 
 on:
@@ -20,17 +21,16 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@v4
-      - name: Signing gate
+      - name: Signing status (no secrets required)
         shell: pwsh
-        env:
-          TS_ENDPOINT: ${{ secrets.TS_ENDPOINT }}
-          TS_ACCOUNT: ${{ secrets.TS_ACCOUNT }}
-          TS_PROFILE: ${{ secrets.TS_PROFILE }}
         run: |
-          if (-not $env:TS_ENDPOINT -or -not $env:TS_ACCOUNT -or -not $env:TS_PROFILE) {
-            Write-Host "BLOCKED — PRODUCTION CODE SIGNING NOT CONFIGURED"
-            Write-Host "Set secrets TS_ENDPOINT, TS_ACCOUNT, TS_PROFILE + Trusted Signing OIDC"
-            exit 0
-          }
-          Write-Host "Secrets present — download artifacts and run windows_sign_verify.ps1 in a follow-up release job"
+          Write-Host "=== TKO code signing status ==="
+          Write-Host "Status: NOT CONFIGURED"
+          Write-Host "Reason: Trusted Signing / OIDC not enabled for this release track"
+          Write-Host "Repo scripts present:"
+          Write-Host "  - scripts/windows_sign.ps1 (Azure Trusted Signing + SignTool + dlib; no PFX)"
+          Write-Host "  - scripts/windows_sign_verify.ps1 (Authenticode + timestamp + chain)"
+          Write-Host "Do NOT store PFX, PKCS#12, or Azure client secrets in the repository."
+          Write-Host "When enabling later: use federated credential / OIDC, not long-lived client secrets."
+          Write-Host "This job is informational and does not fail the pipeline."
           exit 0

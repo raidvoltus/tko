@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 env:
   PYTHONPATH: ${{ github.workspace }}
@@ -154,7 +153,10 @@ jobs:
 
       - name: Signing status
         shell: pwsh
-        run: Write-Host "L4.signing BLOCKED until Azure Trusted Signing secrets configured"
+        run: |
+          Write-Host "L4.signing: NOT CONFIGURED (by design for current release track)"
+          Write-Host "Scripts scripts/windows_sign.ps1 + windows_sign_verify.ps1 retained for future OIDC Trusted Signing"
+          Write-Host "No PFX/private key in repo; do not store client secrets for signing"
 
       - name: Upload artifacts
         if: always()
