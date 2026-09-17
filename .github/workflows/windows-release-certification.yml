@@ -63,14 +63,29 @@ jobs:
       - name: Static order authority audit
         shell: pwsh
         run: |
-          python -c "from pathlib import Path; sites=[]
+          python -c "
+          from pathlib import Path
+          sites = []
+          rejects = []
           for p in Path('src').rglob('*.py'):
-            for i,l in enumerate(p.read_text(encoding='utf-8', errors='ignore').splitlines(),1):
-              if 'new_order' in l: sites.append(f'{p}:{i}:{l.strip()}')
+              text = p.read_text(encoding='utf-8', errors='ignore')
+              for i, l in enumerate(text.splitlines(), 1):
+                  if 'new_order' in l:
+                      sites.append(f'{p}:{i}:{l.strip()}')
+                  if 'place_order' in l or 'submit_order' in l:
+                      rejects.append(f'{p}:{i}:{l.strip()}')
+          print('NEW_ORDER SITES:')
           print(chr(10).join(sites))
-          assert any('execution' in s and 'manager' in s and 'rest.new_order' in s for s in sites)
-          assert any('tokocrypto' in s and 'rest' in s and 'def new_order' in s for s in sites)
-          assert any('entry.py' in s and 'place_order' in s for s in sites)"
+          print('REJECT/PLACE SITES:')
+          print(chr(10).join(rejects))
+          assert any('execution' in s and 'manager' in s and 'rest.new_order' in s for s in sites), sites
+          assert any('tokocrypto' in s and 'rest' in s and 'def new_order' in s for s in sites), sites
+          # GUI/core entry must reject direct order cmds — not a new_order call site
+          assert any('core' in r and 'entry' in r for r in rejects), rejects
+          # No new_order outside rest definition and execution manager
+          bad = [s for s in sites if 'rest.py' not in s and 'manager.py' not in s]
+          assert not bad, bad
+          "
 
       - name: Clean PyInstaller onedir build
         shell: pwsh
