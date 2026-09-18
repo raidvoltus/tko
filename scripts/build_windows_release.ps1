@@ -48,6 +48,12 @@ Write-Host "Preflight imports..."
 & $Python -c "import src.core.entry; import src.gui.entry; print('import OK')"
 if ($LASTEXITCODE -ne 0) { throw "preflight import failed" }
 
+Write-Host "Preflight tkinter/_tkinter (required for TKO-GUI freeze)..."
+& $Python -c "import tkinter; import _tkinter; r=tkinter.Tk(); print('tcl', r.tk.exprstring('$tcl_library')); print('tk', r.tk.exprstring('$tk_library')); r.destroy(); print('tkinter OK')"
+if ($LASTEXITCODE -ne 0) {
+    throw "tkinter/_tkinter not available in build Python. Install official Python with Tcl/Tk (not embeddable package without tk)."
+}
+
 Write-Host "Building TKO-Core (onedir)..."
 & $Python -m PyInstaller (Join-Path $SourceRoot "packaging\tko-core.spec") --noconfirm --clean --distpath $DistDir --workpath (Join-Path $SourceRoot "build\core")
 if ($LASTEXITCODE -ne 0) { throw "Core build failed" }

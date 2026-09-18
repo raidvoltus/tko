@@ -364,3 +364,21 @@ RELEASE
 3. Linux CI cannot execute Level B/C Windows runtime; those require `windows-2022` or a physical/VM Windows host.
 4. Code signing blocked until secrets are configured.
 5. LIVE real orders are out of scope for automated certification.
+
+## TKO-GUI tkinter / `_tkinter` freeze notes
+
+Symptom:
+```
+ModuleNotFoundError: No module named '_tkinter'
+```
+
+Causes:
+1. Build Python without Tcl/Tk (embeddable package, or incomplete install).
+2. Spec did not collect Tcl/Tk data trees into onedir.
+3. User ran only `TKO-GUI.exe` copied alone without the full `TKO-GUI/` onedir folder (`_internal/`, `tcl*`, `tk*`).
+
+Fix:
+- Build with official Windows Python that includes Tcl/Tk.
+- Use `packaging/tko-gui.spec` (collect_all + `$tcl_library` / `$tk_library`).
+- Ship entire `dist/TKO-GUI/` directory.
+- Build script preflight: `import tkinter; import _tkinter`.

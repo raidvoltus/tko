@@ -10,8 +10,26 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger("tko.gui")
+
+
+def _require_tkinter() -> None:
+    try:
+        import tkinter  # noqa: F401
+        import _tkinter  # noqa: F401
+    except ModuleNotFoundError as e:
+        raise SystemExit(
+            "TKO-GUI requires tkinter/_tkinter.\n"
+            "This frozen build is missing Tcl/Tk runtime files.\n"
+            "Rebuild with packaging/tko-gui.spec on official Python (with Tcl/Tk),\n"
+            "and ship the full onedir folder TKO-GUI/ (not only the .exe).\n"
+            f"Original error: {e}"
+        ) from e
 
 
 class GuiIpcBridge:
@@ -47,9 +65,6 @@ class GuiIpcBridge:
             tg_token=tg_token if not str(tg_token).startswith("*") else "",
             tg_chat=tg_chat,
         )
-        if mode:
-            # mode applied on start
-            pass
         return r
 
     def test_tokocrypto(self):
@@ -79,7 +94,14 @@ class GuiIpcBridge:
             "bot_status": r.get("error", "NO_CORE"),
             "balance": {"total": "—", "available": "—", "locked": "—"},
             "market": {"symbol": "—", "last": "—", "bid": "—", "ask": "—", "status": "—"},
-            "signal": {"signal": "—", "prob": "—", "model": "—", "version": "—", "model_status": "—", "last_pred": "—"},
+            "signal": {
+                "signal": "—",
+                "prob": "—",
+                "model": "—",
+                "version": "—",
+                "model_status": "—",
+                "last_pred": "—",
+            },
             "positions": [],
             "orders": [],
             "risk": {"daily_pnl": "—", "exposure": "—", "status": "—", "circuit": False, "kill": False},
@@ -90,11 +112,11 @@ class GuiIpcBridge:
 
 
 def main() -> int:
+    _require_tkinter()
     from src.gui.main_window import MainWindow
 
     bridge = GuiIpcBridge()
     if not bridge.ipc_ok:
-        # Still show UI with error state — fail-closed for trading via empty snapshot
         logger.error("GUI starting without IPC auth — trading unavailable")
     win = MainWindow(bridge)
     win.load_config_into_form({})
