@@ -20,4 +20,4 @@ def test_features_shape():
     vec, names = eng.compute("BTC_USDT")
     assert vec.dtype == np.float32
     assert len(vec) == len(names)
-    assert FEATURE_VERSION == "v1"
+    assert FEATURE_VERSION == "v2"

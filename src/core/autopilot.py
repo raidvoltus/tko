@@ -218,6 +218,22 @@ class Autopilot:
         # ensure USDT baseline
         expected.setdefault("USDT", 0.0)
 
+        # Strategy richness: update expected returns from confluence before rotation
+        import numpy as np
+        for asset in list(expected.keys()):
+            sym = f"{asset}_USDT"
+            cl = self.candles.closes(sym)
+            if len(cl) < 40:
+                continue
+            vol = self.candles.volumes(sym)
+            rsi_val = 50.0
+            vec = feature_map.get(asset)
+            if vec is not None and len(vec) > 12:
+                rsi_val = float(vec[12])
+            sc = self.decision.evaluate_strategies(cl, volumes=vol if len(vol) else None, rsi=rsi_val)
+            # blend feature heuristic with strategy expected return
+            expected[asset] = 0.4 * float(expected.get(asset, 0.0)) + 0.6 * self.decision.strategies.expected_return_pct(sc)
+
         # 5) portfolio snapshot + rotation plan
         snap = self.rotation.build_snapshot(self.balances or {"USDT": {"free": 100.0, "locked": 0.0}}, self.prices)
         plan = self.rotation.plan_cycle(snap, expected, symbols=self.symbols_cache)
@@ -229,15 +245,30 @@ class Autopilot:
         prob = 0.5
         if plan.selected and plan.selected.net_opportunity_pct > 0:
             prob = min(0.9, 0.5 + plan.selected.net_opportunity_pct / 10.0)
+        import numpy as np
+        closes_arr = closes if len(closes) else np.zeros(40, dtype=np.float32)
+        vols_arr = self.candles.volumes(primary)
+        # RSI from feature vector when available (index 12 in FEATURE_NAMES)
+        rsi_val = 50.0
+        btc_vec = feature_map.get("BTC")
+        if btc_vec is not None and len(btc_vec) > 12:
+            rsi_val = float(btc_vec[12])
+            # stored RSI is 0-100 from engine
         signal = self.decision.make_signal(
             cycle_id=cycle_id,
             symbol=primary,
-            closes=closes if len(closes) else __import__("numpy").zeros(30),
+            closes=closes_arr,
             probability=prob,
             expected_return_pct=float(expected.get("BTC", 0)),
             net_opportunity_pct=net,
             model_hash="heuristic" if not self.model_valid else "loaded",
+            volumes=vols_arr if len(vols_arr) else None,
+            rsi=rsi_val,
+            use_strategy_overlay=True,
         )
+        # Feed strategy expected return into rotation map for primary asset
+        if signal.strategy_composite != 0:
+            expected["BTC"] = 0.5 * float(expected.get("BTC", 0)) + 0.5 * float(signal.expected_return_pct)
 
         # 7) risk + optional execution (PAPER only auto; LIVE needs model + no kill)
         order_result = None

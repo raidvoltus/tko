@@ -10,7 +10,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-FEATURE_VERSION = "v1"
+FEATURE_VERSION = "v2"
 MAX_DIM = 64
 
 
@@ -66,6 +66,13 @@ class FeatureEngine:
         "volume_ratio_20",
         "hour_sin", "hour_cos",
         "dow_sin", "dow_cos",
+        "macd_hist_norm",
+        "stoch_rsi_k",
+        "trend_strength",
+        "vol_percentile_proxy",
+        "hurst_proxy",
+        "range_pos_20",
+        "mom_12_1",
     ]
 
     def __init__(self, candle_buffer: Optional[CandleBuffer] = None):
@@ -145,6 +152,79 @@ class FeatureEngine:
         feats.append(float(np.cos(2 * np.pi * hour / 24)))
         feats.append(float(np.sin(2 * np.pi * dow / 7)))
         feats.append(float(np.cos(2 * np.pi * dow / 7)))
+
+        # --- v2 richness (CPU-only, no lookahead) ---
+        # MACD histogram normalized by price
+        if len(c) >= 35:
+            ema12 = float(c[-26])
+            ema26 = float(c[-26])
+            a12, a26 = 2.0 / 13.0, 2.0 / 27.0
+            for px in c[-26:]:
+                ema12 = a12 * float(px) + (1 - a12) * ema12
+                ema26 = a26 * float(px) + (1 - a26) * ema26
+            macd = ema12 - ema26
+            feats.append(float(macd / (float(c[-1]) + 1e-12)))
+        else:
+            feats.append(0.0)
+
+        # Stochastic RSI K (0-1)
+        rsi_series = []
+        if len(c) >= 30:
+            for i in range(14, min(28, len(c))):
+                window = c[i - 14 : i + 1]
+                rsi_series.append(self._rsi(window, 14))
+            if rsi_series:
+                rmin, rmax = min(rsi_series), max(rsi_series)
+                last_rsi = rsi_series[-1]
+                stoch = (last_rsi - rmin) / (rmax - rmin + 1e-12)
+                feats.append(float(stoch))
+            else:
+                feats.append(0.5)
+        else:
+            feats.append(0.5)
+
+        # Trend strength |sma10-sma30|/price
+        if len(c) >= 30:
+            s10, s30 = float(np.mean(c[-10:])), float(np.mean(c[-30:]))
+            feats.append(abs(s10 - s30) / (float(c[-1]) + 1e-12))
+        else:
+            feats.append(0.0)
+
+        # Vol percentile proxy vs longer window
+        if len(c) >= 60:
+            r = np.diff(np.log(c.astype(np.float64) + 1e-12))
+            v20 = float(np.std(r[-20:]))
+            hist = [float(np.std(r[i - 20 : i])) for i in range(20, len(r) + 1)]
+            if hist:
+                feats.append(sum(1 for x in hist if x <= v20) / len(hist))
+            else:
+                feats.append(0.5)
+        else:
+            feats.append(0.5)
+
+        # Hurst proxy
+        if len(c) >= 45:
+            r = np.diff(np.log(c.astype(np.float64) + 1e-12))
+            vs = float(np.std(r[-10:])) + 1e-12
+            vl = float(np.std(r[-40:])) + 1e-12
+            feats.append(float(np.log(vs / vl) / np.log(10 / 40)))
+        else:
+            feats.append(0.0)
+
+        # Range position 20
+        if len(c) >= 20:
+            hi, lo = float(np.max(c[-20:])), float(np.min(c[-20:]))
+            feats.append((float(c[-1]) - lo) / (hi - lo + 1e-12))
+        else:
+            feats.append(0.5)
+
+        # 12-1 momentum style (approx on bars): ret_12 - ret_1
+        if len(c) > 12 and c[-13] > 0 and c[-2] > 0:
+            r12 = float(np.log(c[-1] / c[-13]))
+            r1 = float(np.log(c[-1] / c[-2]))
+            feats.append(r12 - r1)
+        else:
+            feats.append(0.0)
 
         arr = np.array(feats[:MAX_DIM], dtype=np.float32)
         # pad/truncate
