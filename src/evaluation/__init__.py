@@ -8,6 +8,14 @@ from src.evaluation.pit_dataset import (
     assert_feature_label_alignment,
 )
 from src.evaluation.runner import WalkForwardRunner, WalkForwardReport, CostModel, compare_champion_challenger
+from src.evaluation.calibration import (
+    PlattCalibrator,
+    IsotonicCalibrator,
+    EdgeCalibrator,
+    expected_calibration_error,
+    brier_score,
+)
+from src.evaluation.ohlcv_loader import load_ohlcv_csv
 
 __all__ = [
     "WalkForwardSplit",
@@ -24,4 +32,10 @@ __all__ = [
     "WalkForwardReport",
     "CostModel",
     "compare_champion_challenger",
+    "PlattCalibrator",
+    "IsotonicCalibrator",
+    "EdgeCalibrator",
+    "expected_calibration_error",
+    "brier_score",
+    "load_ohlcv_csv",
 ]

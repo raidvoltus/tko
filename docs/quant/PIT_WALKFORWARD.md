@@ -50,3 +50,24 @@ Default gate outcome without operator: **KEEP_CHAMPION** / **INSUFFICIENT_EVIDEN
 - Strategy profitability
 - Calibrated expected returns
 - Automatic promotion
+
+## Calibration (strengthening)
+
+`src/evaluation/calibration.py`:
+
+| Tool | Use |
+|------|-----|
+| PlattCalibrator | Small-n logistic map score→probability |
+| IsotonicCalibrator | Monotone bin map when n larger |
+| EdgeCalibrator | composite → empirical mean net PnL by bin |
+| ECE / Brier | Report only; `calibrated=True` only after fit |
+
+Walk-forward runner fits Platt + Edge on **validation** indices only, reports ECE before/after.
+
+## OHLCV loader
+
+`load_ohlcv_csv(path)` → `PITDataset` for operator-supplied historical bars (no API keys in code).
+
+## Observability
+
+`src/observability/metrics.py` — cycle metrics ring + counters (`risk_allow`/`risk_deny`).
