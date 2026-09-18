@@ -1,13 +1,13 @@
 """Champion registry + challenger tracking. Deterministic rollback."""
 from __future__ import annotations
 
-import json
 import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.champion.manifest import ChampionManifest, ChallengerManifest
+from src.champion.integrity import write_integrity_sidecar
+from src.champion.manifest import ChallengerManifest, ChampionManifest
 from src.champion.states import ALLOWED_TRANSITIONS, ChallengerState
 
 logger = logging.getLogger(__name__)
@@ -135,6 +135,4 @@ class ChampionRegistry:
             "history": self.history[-200:],
         }
         path = self.store_dir / "champion_registry.json"
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp.replace(path)
+        write_integrity_sidecar(path, payload)

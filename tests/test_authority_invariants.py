@@ -1,14 +1,12 @@
 """Authority invariants: static scan + runtime capability boundary."""
 from pathlib import Path
 
-import numpy as np
-
-from src.decision.strategies import StrategyEngine
-from src.decision.governor import Governor
-from src.decision.ensemble import Ensemble
-from src.decision.plane import DecisionPlane
-from src.champion.registry import ChampionRegistry
 from src.champion.promotion import PromotionGate
+from src.champion.registry import ChampionRegistry
+from src.decision.ensemble import Ensemble
+from src.decision.governor import Governor
+from src.decision.plane import DecisionPlane
+from src.decision.strategies import StrategyEngine
 from src.security.authority import assert_no_execution_capability
 
 ROOT = Path(__file__).resolve().parents[1]

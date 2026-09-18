@@ -1,13 +1,14 @@
 """Champion–Challenger framework tests — no orders."""
-from src.champion.manifest import ChampionManifest, ChallengerManifest, compute_config_hash
+import numpy as np
+
+from src.champion.manifest import ChallengerManifest, ChampionManifest
+from src.champion.promotion import PromotionGate, Scorecard
 from src.champion.registry import ChampionRegistry
 from src.champion.states import ChallengerState, PromotionDecision
-from src.champion.promotion import PromotionGate, Scorecard
-from src.evaluation.walk_forward import generate_walk_forward_splits
-from src.decision.edge import cost_adjusted_edge, strategy_score_to_gross_edge
+from src.decision.edge import cost_adjusted_edge
 from src.decision.governor import Governor
 from src.decision.strategies import StrategyEngine
-import numpy as np
+from src.evaluation.walk_forward import generate_walk_forward_splits
 
 
 def test_champion_manifest_identity():
@@ -129,7 +130,7 @@ def test_cost_adjusted_edge():
 def test_governor_unknown_no_trade():
     eng = StrategyEngine()
     c = np.linspace(100, 101, 20)
-    sc = eng.evaluate(c)
+    eng.evaluate(c)
     # force unknown via empty-ish
     from src.decision.strategies import StrategyScores
     unknown = StrategyScores(

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Type
 
-
 FORBIDDEN_ATTR_NAMES = (
     "exec_mgr",
     "execution_manager",

@@ -245,7 +245,6 @@ class Autopilot:
         prob = 0.5
         if plan.selected and plan.selected.net_opportunity_pct > 0:
             prob = min(0.9, 0.5 + plan.selected.net_opportunity_pct / 10.0)
-        import numpy as np
         closes_arr = closes if len(closes) else np.zeros(40, dtype=np.float32)
         vols_arr = self.candles.volumes(primary)
         # RSI from feature vector when available (index 12 in FEATURE_NAMES)

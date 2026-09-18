@@ -10,10 +10,10 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from src.decision.strategies import StrategyEngine, StrategyScores
-from src.decision.ensemble import Ensemble
 from src.decision.edge import cost_adjusted_edge, strategy_score_to_gross_edge
+from src.decision.ensemble import Ensemble
 from src.decision.governor import Governor
+from src.decision.strategies import StrategyEngine, StrategyScores
 
 logger = logging.getLogger(__name__)
 

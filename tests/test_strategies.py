@@ -1,10 +1,9 @@
 """Strategy richness unit tests — no exchange, no orders."""
 import numpy as np
-import pytest
 
-from src.decision.strategies import RegimeDetector, StrategyEngine
 from src.decision.plane import DecisionPlane
-from src.features.engine import CandleBuffer, FeatureEngine, FEATURE_VERSION
+from src.decision.strategies import RegimeDetector, StrategyEngine
+from src.features.engine import FEATURE_VERSION, CandleBuffer, FeatureEngine
 
 
 def _synth_trend(n=80, up=True):
