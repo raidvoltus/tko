@@ -1,5 +1,13 @@
-from src.evaluation.scorecard import block_bootstrap_mean_ci, build_scorecard, calibration_reliability
 from src.evaluation.walk_forward import WalkForwardSplit, generate_walk_forward_splits
+from src.evaluation.scorecard import build_scorecard, block_bootstrap_mean_ci, calibration_reliability
+from src.evaluation.pit_dataset import (
+    PITDataset,
+    PIT_SCHEMA_VERSION,
+    build_pit_from_closes,
+    schema_hash,
+    assert_feature_label_alignment,
+)
+from src.evaluation.runner import WalkForwardRunner, WalkForwardReport, CostModel, compare_champion_challenger
 
 __all__ = [
     "WalkForwardSplit",
@@ -7,4 +15,13 @@ __all__ = [
     "build_scorecard",
     "block_bootstrap_mean_ci",
     "calibration_reliability",
+    "PITDataset",
+    "PIT_SCHEMA_VERSION",
+    "build_pit_from_closes",
+    "schema_hash",
+    "assert_feature_label_alignment",
+    "WalkForwardRunner",
+    "WalkForwardReport",
+    "CostModel",
+    "compare_champion_challenger",
 ]
