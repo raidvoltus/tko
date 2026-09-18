@@ -107,7 +107,21 @@ Copy-Item -Recurse -Force (Join-Path $DistDir "TKO-GUI") (Join-Path $rel "TKO-GU
 Copy-Item -Force $sums (Join-Path $rel "checksums.txt")
 Copy-Item -Force (Join-Path $DistDir "release-manifest.json") (Join-Path $rel "RELEASE_MANIFEST.json")
 
+# Place writable config next to onedir EXEs (in addition to ProgramData first-run copy)
+foreach ($pair in @(
+    @{ dir = "TKO-Core"; exe = "TKO-Core.exe" },
+    @{ dir = "TKO-GUI";  exe = "TKO-GUI.exe" }
+)) {
+    $cfgDir = Join-Path $DistDir ($pair.dir + "\config")
+    New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+    $srcCfg = Join-Path $SourceRoot "config\config.yaml"
+    if (Test-Path $srcCfg) {
+        Copy-Item -Force $srcCfg (Join-Path $cfgDir "config.yaml")
+    }
+}
+
 Write-Host "Build complete (onedir)."
+
 Write-Host "  $core ($coreSha)"
 Write-Host "  $gui ($guiSha)"
 Get-ChildItem $DistDir -Force | ForEach-Object { Write-Host ("  dist/{0}" -f $_.Name) }

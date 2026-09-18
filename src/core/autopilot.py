@@ -30,7 +30,8 @@ class Autopilot:
     """Single-process full autopilot loop for resource-constrained node."""
 
     def __init__(self, root: Optional[Path] = None):
-        self.root = Path(root) if root else Path(".")
+        # None → ControlPlane uses frozen-aware ProgramData / install_dir paths
+        self.root = Path(root) if root is not None else None
         self.control = ControlPlane(self.root)
         try:
             self.cfg = self.control.load_config()

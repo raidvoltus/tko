@@ -44,10 +44,22 @@ def atomic_write(path: Path, data: bytes) -> None:
 
 class ControlPlane:
     def __init__(self, root: Optional[Path] = None):
-        self.root = Path(root) if root else Path(".")
-        self.config_path = self.root / "config" / "config.yaml"
-        self.state_dir = self.root / "state"
-        self.audit_dir = self.root / "audit"
+        from src.utils.paths import ensure_default_config, program_data_dir, resolve_config_path, state_root
+
+        if root is not None:
+            self.root = Path(root)
+            self.config_path = self.root / "config" / "config.yaml"
+            self.state_dir = self.root / "state"
+            self.audit_dir = self.root / "audit"
+        else:
+            # Frozen-aware: config beside EXE or ProgramData; state always ProgramData
+            data = state_root()
+            self.root = data
+            self.config_path = resolve_config_path()
+            # materialize template on first run
+            self.config_path = ensure_default_config(self.config_path)
+            self.state_dir = data / "state"
+            self.audit_dir = data / "audit"
         self.kill_path = self.state_dir / "kill_switch.flag"
         self.registry_path = self.state_dir / "model_registry.json"
         self.flags_path = self.state_dir / "feature_flags.json"

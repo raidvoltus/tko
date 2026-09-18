@@ -7,10 +7,15 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-# Ensure project root on path when frozen or script
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# Bootstrap sys.path before importing src.* (dev mode)
+if not getattr(sys, "frozen", False):
+    _dev_root = Path(__file__).resolve().parents[2]
+    if str(_dev_root) not in sys.path:
+        sys.path.insert(0, str(_dev_root))
+
+from src.utils.paths import install_dir, is_frozen  # noqa: E402
+
+ROOT = install_dir()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,7 +49,6 @@ def build_handler(auto):
             auto.kill()
             return {"ok": True, "kill": True}
         if cmd == "configure":
-            # GUI may send credentials over authenticated IPC only
             auto.configure_credentials(
                 str(req.get("api_key", "")),
                 str(req.get("api_secret", "")),
@@ -61,7 +65,6 @@ def build_handler(auto):
         if cmd == "test_telegram":
             ok = auto.tg.test_connection()
             return {"ok": ok}
-        # Explicitly reject any direct order command from GUI
         if cmd in ("order", "buy", "sell", "submit_order", "place_order"):
             return {"ok": False, "error": "orders_only_via_core_risk_not_gui"}
         return {"ok": False, "error": f"unknown_cmd:{cmd}"}
@@ -74,6 +77,7 @@ def main() -> int:
     from src.ipc.server import IpcServer
     from src.ipc.token import TokenError, ensure_ipc_token
 
+    logger.info("install_dir=%s frozen=%s", ROOT, is_frozen())
     try:
         path = ensure_ipc_token()
         logger.info("IPC token ready at %s", path)
@@ -81,7 +85,7 @@ def main() -> int:
         logger.error("IPC bootstrap failed: %s", e)
         return 2
 
-    auto = Autopilot(root=str(ROOT))
+    auto = Autopilot()  # frozen-aware config/state paths
     server = IpcServer(build_handler(auto))
     try:
         server.start()
@@ -89,7 +93,11 @@ def main() -> int:
         logger.error("IPC server failed: %s", e)
         return 3
 
-    logger.info("TKO-Core ready (mode=%s). Ctrl+C to stop.", auto.exec_mgr.mode)
+    logger.info(
+        "TKO-Core ready (mode=%s). config=%s Ctrl+C to stop.",
+        auto.exec_mgr.mode,
+        getattr(auto.control, "config_path", "?"),
+    )
     try:
         while True:
             time.sleep(1.0)
