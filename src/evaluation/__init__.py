@@ -11,9 +11,17 @@ from src.evaluation.runner import WalkForwardRunner, WalkForwardReport, CostMode
 from src.evaluation.calibration import (
     PlattCalibrator,
     IsotonicCalibrator,
+    BetaCalibrator,
+    TemperatureCalibrator,
+    IdentityCalibrator,
     EdgeCalibrator,
+    CalibratorSelector,
+    CalibrationArtifact,
     expected_calibration_error,
+    maximum_calibration_error,
     brier_score,
+    log_loss,
+    full_metrics,
 )
 from src.evaluation.ohlcv_loader import load_ohlcv_csv
 
@@ -34,8 +42,16 @@ __all__ = [
     "compare_champion_challenger",
     "PlattCalibrator",
     "IsotonicCalibrator",
+    "BetaCalibrator",
+    "TemperatureCalibrator",
+    "IdentityCalibrator",
     "EdgeCalibrator",
+    "CalibratorSelector",
+    "CalibrationArtifact",
     "expected_calibration_error",
+    "maximum_calibration_error",
     "brier_score",
+    "log_loss",
+    "full_metrics",
     "load_ohlcv_csv",
 ]

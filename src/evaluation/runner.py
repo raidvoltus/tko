@@ -20,8 +20,8 @@ from src.evaluation.pit_dataset import PITDataset
 from src.evaluation.scorecard import block_bootstrap_mean_ci, build_scorecard
 from src.evaluation.calibration import (
     EdgeCalibrator,
-    PlattCalibrator,
-    expected_calibration_error,
+    CalibratorSelector,
+    IdentityCalibrator,
 )
 from src.evaluation.walk_forward import WalkForwardSplit, generate_walk_forward_splits
 
@@ -232,50 +232,67 @@ class WalkForwardRunner:
         agg_ci = block_bootstrap_mean_ci(
             all_pnls, block_size=max(5, len(all_pnls) // 20 or 5), n_boot=150
         )
-        # Fit calibrators on concatenated valid-region composites vs direction outcomes
-        cal_info: Dict[str, float] = {"platt_fitted": 0.0, "edge_fitted": 0.0, "ece": 1.0}
+        # Scientific calibrator selection on validation region (time-ordered)
+        # fit on first half of valid indices across folds; select on second half
+        cal_info: Dict[str, Any] = {"selected": "identity", "is_calibrated": False}
+        notes_extra = "calibration_selector"
         try:
             raw_scores, outcomes, comps, realized = [], [], [], []
             for sp in splits:
-                for t in range(sp.purge_end, sp.valid_end):
-                    if t < self.min_bars_history:
+                for t_idx in range(sp.purge_end, sp.valid_end):
+                    if t_idx < self.min_bars_history:
                         continue
-                    closes = ds.close[: t + 1]
-                    vols = ds.volume[: t + 1]
-                    rsi = float(ds.features["rsi_14"][t]) if "rsi_14" in ds.features else 50.0
+                    closes = ds.close[: t_idx + 1]
+                    vols = ds.volume[: t_idx + 1]
+                    rsi = float(ds.features["rsi_14"][t_idx]) if "rsi_14" in ds.features else 50.0
                     sc = self.strategies.evaluate(closes, volumes=vols, rsi=rsi)
-                    p01 = 0.5 + 0.5 * sc.composite
+                    p01 = 0.5 + 0.5 * float(sc.composite)
                     fwd = ds.labels.get("fwd_ret_1")
-                    if fwd is None or t >= len(fwd) or not np.isfinite(fwd[t]):
+                    if fwd is None or t_idx >= len(fwd) or not np.isfinite(fwd[t_idx]):
                         continue
-                    y = 1.0 if float(fwd[t]) > 0 else 0.0
+                    y = 1.0 if float(fwd[t_idx]) > 0 else 0.0
                     raw_scores.append(p01)
                     outcomes.append(y)
-                    comps.append(sc.composite)
-                    # rough realized signed pct for edge calib
-                    realized.append(float(fwd[t]) * 100.0 * (1.0 if sc.composite >= 0 else -1.0) - self.cost.total_pct())
-            platt = PlattCalibrator().fit(raw_scores, outcomes)
-            edge_cal = EdgeCalibrator().fit(comps, realized)
+                    comps.append(float(sc.composite))
+                    realized.append(
+                        float(fwd[t_idx]) * 100.0 * (1.0 if sc.composite >= 0 else -1.0)
+                        - self.cost.total_pct()
+                    )
+            n = len(raw_scores)
+            mid = max(1, n // 2)
+            selector = CalibratorSelector()
+            cal, artifact = selector.select(
+                raw_scores[:mid], outcomes[:mid],
+                raw_scores[mid:], outcomes[mid:],
+            )
+            edge_cal = EdgeCalibrator().fit(comps[:mid], realized[:mid])
             cal_info = {
-                "platt_fitted": 1.0 if platt.fitted else 0.0,
+                "selected": artifact.selected,
+                "version": artifact.version,
+                "is_calibrated": artifact.is_calibrated,
+                "brier_raw": artifact.metrics_raw.get("brier", 1.0),
+                "brier_selected": artifact.metrics_selected.get("brier", 1.0),
+                "log_loss_selected": artifact.metrics_selected.get("log_loss", 10.0),
+                "ece_selected": artifact.metrics_selected.get("ece", 1.0),
+                "slope": artifact.metrics_selected.get("slope", 1.0),
+                "intercept": artifact.metrics_selected.get("intercept", 0.0),
                 "edge_fitted": 1.0 if edge_cal.fitted else 0.0,
-                "ece_before": float(platt.ece_before) if platt.fitted else 1.0,
-                "ece_after": float(platt.ece_after) if platt.fitted else 1.0,
-                "brier_after": float(platt.brier_after) if platt.fitted else 1.0,
-                "n_cal": float(platt.n_fit),
+                "n_fit": float(artifact.n_fit),
+                "n_select": float(artifact.n_select),
+                "candidates": list(artifact.candidate_metrics.keys()),
             }
+            notes_extra = f"calibrator={artifact.selected};" + ",".join(artifact.notes)
         except Exception as e:
-            cal_info["error"] = 1.0
+            cal_info["error"] = type(e).__name__
             notes_extra = f"calibration_fit_error:{type(e).__name__}"
-        else:
-            notes_extra = "calibration_fit_on_validation_folds"
 
         notes = [
-            "cost_adjusted=True (costs explicit; edge calibrated only if edge_fitted=1)",
+            "cost_adjusted=True (costs explicit; probability calibrated only if is_calibrated)",
             "signals from StrategyEngine confluence only",
             "no RiskEngine/Execution path in this runner",
             f"entry_threshold={self.entry_threshold}",
             notes_extra,
+            "selection: Brier primary then log_loss then ECE vs identity",
         ]
         if not folds:
             notes.append("INSUFFICIENT_SAMPLES_FOR_SPLITS")
