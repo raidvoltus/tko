@@ -13,6 +13,7 @@ def _make_mgr():
     risk.ws_connected = True
     risk.orderbook_synced = True
     risk.update_market_ts("BTC_USDT")
+    risk.apply_authoritative_snapshot(equity=10_000.0, positions={}, daily_pnl=0.0)
     rest = RestClient()  # no real keys
     mgr = ExecutionManager(rest, risk, mode="PAPER")
     mgr.filters["BTC_USDT"] = SymbolFilters(

@@ -1,38 +1,68 @@
-# Risk Engine (Absolute Authority)
-
-References informing design (not copied code):
-- riskkit (drawdown ladder, concentration, session limits)
-- robson (monthly/daily budget, circuit breaker, audit events)
-- enterprise-crypto (kill switch, reduce-only, fail-closed hierarchy)
-- industry practice: HWM drawdown, order-rate limits, NaN rejection
+# Risk Engine — Absolute Authority (Production)
 
 ## Hierarchy
 
 ```
-Strategy / ML / Governor  →  propose only
-        ↓
-   RiskEngine.check()     →  ALLOW / DENY (absolute)
-        ↓
-   ExecutionManager       →  RestClient only if ALLOW
+Strategy / ML / Challenger / Ensemble / Governor  → evidence / policy only
+                ↓
+         RiskEngine.admit()  → ALLOW + reservation | DENY
+                ↓
+         ExecutionManager (LIVE only for exchange)
+                ↓
+         RestClient.new_order → Tokocrypto
 ```
 
-## Modes
+## Production execution
 
-| Mode | Meaning |
-|------|---------|
-| NORMAL | Full limits apply |
-| WARNING | size_multiplier advisory 0.5 |
-| REDUCE_ONLY | only reduce_only_intent orders |
-| HALT | no new orders (kill / breaker / max DD) |
+- **LIVE** = production trading path (only path that calls RestClient).
+- **PAPER / SHADOW** = non-production test harness; still require Risk ALLOW; never production fallback.
 
-## Hard blocks (examples)
+## State health
 
-KILL_SWITCH, CIRCUIT_BREAKER, MARKET_STALE, WS_DISCONNECTED,
-ORDERBOOK_DESYNC, CLOCK_DRIFT, INVALID/ZERO/NEGATIVE_NOTIONAL,
-MAX_ORDER_VALUE, MAX_POSITION, MAX_EXPOSURE, MAX_SYMBOL_CONCENTRATION,
-MAX_DAILY_LOSS, MAX_CONSECUTIVE_LOSSES, MAX_DRAWDOWN, REDUCE_ONLY_MODE,
-MAX_ORDERS_PER_DAY, MAX_ORDERS_PER_MINUTE, LOSS_COOLDOWN, VOLATILITY_HALT
+| Health | Trading |
+|--------|---------|
+| UNRECONCILED / RECONCILING / INVALID / UNKNOWN | **NO TRADE** |
+| VALID | subject to all hard gates |
 
-## Fail-closed
+Restart: default `UNRECONCILED` → must `apply_authoritative_snapshot()` after REST reconcile.
 
-Any invalid data state → deny. No silent pass on NaN/Inf.
+## Reduce-only (authoritative)
+
+Caller `reduce_only_intent` is **ignored** for allow decisions.
+
+Engine computes from position + side + notional:
+
+- Long + SELL ≤ position → reducing
+- Long + SELL > position → not fully reducing → DENY in REDUCE_ONLY
+- BUY on long/flat → increasing
+- Flat + SELL → `SPOT_SHORT_NOT_ALLOWED` (spot default)
+
+## Admission / reservation
+
+`admit()` under `RLock`: check + reserve rate slot + reservation_id.  
+`commit_reservation` after exchange ACK.  
+`release_reservation(safe=True)` if aborted before send.  
+UNKNOWN after send → `mark_unknown_order` + release `safe=False` (capacity not restored).
+
+## Hard blocks (non-exhaustive)
+
+STATE_*, KILL_SWITCH, CIRCUIT_BREAKER, MARKET_STALE, WS_DISCONNECTED,
+ORDERBOOK_DESYNC, CLOCK_DRIFT, INVALID_*, MAX_*, REDUCE_ONLY_MODE,
+SPOT_SHORT_NOT_ALLOWED, LOSS_COOLDOWN, VOLATILITY_HALT
+
+## Kill / breaker reset
+
+Requires `operator_approved=True` and `state_health==VALID`.  
+Does not clear active max-drawdown / daily-loss fundamental breaches.
+
+## Session day
+
+`session_tz_offset_hours` default **7** (WIB). Daily PnL / order counters roll on that day key.
+
+## Advisory vs authoritative
+
+| Item | Role |
+|------|------|
+| size_multiplier | advisory only |
+| admit/check ALLOW | authoritative |
+| is_risk_reducing | authoritative |

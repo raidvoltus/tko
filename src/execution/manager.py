@@ -1,4 +1,9 @@
-"""Order execution manager - Risk → Filters → Submit → Track → Reconcile."""
+"""Order execution manager — Risk admit → normalize → LIVE RestClient only.
+
+Production path: LIVE only.
+PAPER/SHADOW remain non-production test harnesses (no exchange credentials path).
+They still require Risk ALLOW; they never bypass RiskEngine.
+"""
 from __future__ import annotations
 
 import logging
@@ -6,6 +11,7 @@ from typing import Dict, List, Optional
 
 from src.core.order_state import Order, OrderState
 from src.execution.filters import SymbolFilters, normalize_order
+from src.execution.production_policy import is_production_trading_mode
 from src.risk.engine import RiskEngine, RiskStatus
 from src.tokocrypto.rest import OrderResultStatus, RestClient
 
@@ -17,14 +23,14 @@ class ExecutionManager:
         self,
         rest: RestClient,
         risk: RiskEngine,
-        mode: str = "PAPER",
+        mode: str = "LIVE",
         symbol_filters: Optional[Dict[str, SymbolFilters]] = None,
     ):
         self.rest = rest
         self.risk = risk
-        self.mode = mode.upper()  # PAPER | SHADOW | LIVE
+        self.mode = mode.upper()
         self.filters = symbol_filters or {}
-        self.orders: Dict[str, Order] = {}  # client_id -> Order
+        self.orders: Dict[str, Order] = {}
         self._paper_id_seq = 1000000
 
     def set_mode(self, mode: str) -> None:
@@ -34,7 +40,7 @@ class ExecutionManager:
         if m == "LIVE" and self.risk.kill_switch:
             raise RuntimeError("Cannot enable LIVE while kill switch is active")
         self.mode = m
-        logger.info("Execution mode set to %s", self.mode)
+        logger.info("Execution mode set to %s (production=%s)", self.mode, is_production_trading_mode(m))
 
     def submit(
         self,
@@ -61,101 +67,138 @@ class ExecutionManager:
         )
         self.orders[cid] = order
 
-        # 1. RISK_CHECK
+        # 1) Normalize against exchange filters BEFORE risk (authoritative notional)
         order.transition(OrderState.RISK_CHECK)
-        notional = 0.0
-        try:
-            if quantity and price:
-                notional = float(quantity) * float(price)
-            elif quote_order_qty:
-                notional = float(quote_order_qty)
-            elif quantity and reference_price:
-                notional = float(quantity) * reference_price
-        except Exception:
-            notional = 0.0
+        filt = self.filters.get(symbol)
+        if filt is not None:
+            try:
+                from decimal import Decimal
+                ref = Decimal(str(reference_price)) if reference_price is not None else None
+                ok, params, err = normalize_order(
+                    filt,
+                    side=side,
+                    order_type=order_type,
+                    quantity=quantity,
+                    price=price,
+                    quote_order_qty=quote_order_qty,
+                    reference_price=ref,
+                )
+                if not ok:
+                    order.transition(OrderState.REJECTED, f"normalize:{err}")
+                    return order
+                if "quantity" in params:
+                    order.quantity = params["quantity"]
+                    quantity = order.quantity
+                if "price" in params:
+                    order.price = params["price"]
+                    price = order.price
+                if "quote_order_qty" in params:
+                    order.quote_order_qty = params["quote_order_qty"]
+                    quote_order_qty = order.quote_order_qty
+            except Exception as e:
+                order.transition(OrderState.REJECTED, f"normalize:{e}")
+                return order
 
-        risk_status: RiskStatus = self.risk.check(
+        notional = self._notional(quantity, price, quote_order_qty, reference_price)
+
+        # 2) Atomic risk admission (authoritative reduce-only inside engine)
+        risk_status: RiskStatus = self.risk.admit(
             symbol=symbol,
             side=side,
             notional=notional,
             available_balance=available_balance,
+            client_id=cid,
         )
         if not risk_status.allowed:
-            order.transition(OrderState.REJECTED, risk_status.reason)
-            logger.warning("Order %s rejected by Risk: %s", cid, risk_status.reason)
+            order.transition(OrderState.REJECTED, f"RISK:{risk_status.reason}")
+            if risk_status.reservation_id:
+                self.risk.release_reservation(risk_status.reservation_id, safe=True)
             return order
 
-        # 2. EXCHANGE_RULE_CHECK + NORMALIZE
-        order.transition(OrderState.EXCHANGE_RULE_CHECK)
-        sf = self.filters.get(symbol)
-        if sf is None:
-            order.transition(OrderState.REJECTED, "no symbol filters")
-            return order
+        reservation_id = risk_status.reservation_id
 
-        from decimal import Decimal
-        ref = Decimal(str(reference_price)) if reference_price else None
-        ok, norm, err = normalize_order(
-            sf, side, order_type, quantity, price, quote_order_qty, ref
-        )
-        if not ok:
-            order.transition(OrderState.REJECTED, err)
-            return order
-        order.transition(OrderState.NORMALIZE, str(norm))
-        if "quantity" in norm:
-            order.quantity = norm["quantity"]
-        if "price" in norm:
-            order.price = norm["price"]
-        if "quoteOrderQty" in norm:
-            order.quote_order_qty = norm["quoteOrderQty"]
-
-        # 3. SUBMIT
-        order.transition(OrderState.SUBMIT)
+        # 3) Mode dispatch
         if self.mode == "PAPER":
+            # Non-production test harness — risk already ALLOW
+            self.risk.commit_reservation(reservation_id)
             return self._paper_fill(order)
+
         if self.mode == "SHADOW":
-            # simulate submit but do not send real order
-            order.transition(OrderState.ACK, "SHADOW simulated")
-            order.exchange_order_id = self._next_paper_id()
+            # Non-production: log intent, no exchange
+            self.risk.commit_reservation(reservation_id)
+            order.transition(OrderState.REJECTED, "SHADOW_NO_EXCHANGE")
             return order
 
-        # LIVE
-        status, body = self.rest.new_order(
-            symbol=order.symbol,
-            side=order.side,
-            order_type=order.order_type,
-            quantity=order.quantity,
-            price=order.price,
-            quote_order_qty=order.quote_order_qty,
-            client_id=order.client_id,
-        )
-        order.raw_ack = body
+        # LIVE production — single RestClient path
+        if not is_production_trading_mode(self.mode):
+            self.risk.release_reservation(reservation_id, safe=True)
+            order.transition(OrderState.REJECTED, "NOT_LIVE")
+            return order
+
+        order.transition(OrderState.SUBMIT)
+        try:
+            status, body = self.rest.new_order(
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                quantity=quantity,
+                price=price,
+                quote_order_qty=quote_order_qty,
+                client_id=cid,
+            )
+        except Exception as e:
+            # UNKNOWN: may have been sent
+            self.risk.mark_unknown_order(cid)
+            self.risk.release_reservation(reservation_id, safe=False)
+            order.transition(OrderState.UNKNOWN, f"submit_exc:{e}")
+            return order
+
+        order.raw_last = body if isinstance(body, dict) else {"raw": body}
 
         if status == OrderResultStatus.ACK:
-            order.transition(OrderState.ACK)
-            # extract orderId if present
-            data = body.get("data") or body
+            self.risk.commit_reservation(reservation_id)
+            data = body.get("data") or body if isinstance(body, dict) else {}
             oid = data.get("orderId") or data.get("order_id")
             if oid is not None:
-                order.exchange_order_id = int(oid)
+                try:
+                    order.exchange_order_id = int(oid)
+                except (TypeError, ValueError):
+                    pass
+            order.transition(OrderState.ACK)
             order.transition(OrderState.TRACK)
         elif status == OrderResultStatus.REJECTED:
+            self.risk.release_reservation(reservation_id, safe=True)
             order.transition(OrderState.REJECTED, str(body)[:200])
-        elif status == OrderResultStatus.RATE_LIMITED:
-            order.transition(OrderState.REJECTED, "RATE_LIMITED")
-            self.risk.record_api_error()
-        elif status == OrderResultStatus.IP_BANNED:
-            order.transition(OrderState.REJECTED, "IP_BANNED")
-            self.risk.activate_kill_switch("IP_BANNED 418")
         elif status == OrderResultStatus.UNKNOWN:
+            self.risk.mark_unknown_order(cid)
+            self.risk.release_reservation(reservation_id, safe=False)
             order.transition(OrderState.UNKNOWN, "UNKNOWN - needs reconciliation")
-            # DO NOT treat as failed; schedule reconcile
         else:
+            self.risk.mark_unknown_order(cid)
+            self.risk.release_reservation(reservation_id, safe=False)
             order.transition(OrderState.UNKNOWN, str(status))
 
         return order
 
+    @staticmethod
+    def _notional(
+        quantity: Optional[str],
+        price: Optional[str],
+        quote_order_qty: Optional[str],
+        reference_price: Optional[float],
+    ) -> float:
+        try:
+            if quantity and price:
+                return float(quantity) * float(price)
+            if quote_order_qty:
+                return float(quote_order_qty)
+            if quantity and reference_price:
+                return float(quantity) * float(reference_price)
+        except (TypeError, ValueError):
+            return float("nan")
+        return 0.0
+
     def reconcile(self, order: Order) -> Order:
-        """Query exchange for true status of UNKNOWN orders."""
         if order.state != OrderState.UNKNOWN and order.state != OrderState.TRACK:
             return order
         if not order.exchange_order_id and not order.client_id:
@@ -183,20 +226,18 @@ class ExecutionManager:
             else:
                 order.transition(OrderState.TRACK, f"status={st}")
         elif status == OrderResultStatus.REJECTED:
-            # order may not exist
             order.transition(OrderState.REJECTED, "query returned reject")
         else:
-            # still unknown
             order.transition(OrderState.UNKNOWN, "reconcile still unknown")
         return order
 
     def _paper_fill(self, order: Order) -> Order:
-        """Immediate fill simulation for PAPER mode."""
+        """Non-production simulated fill for unit tests only."""
         order.exchange_order_id = self._next_paper_id()
-        order.transition(OrderState.ACK, "PAPER")
+        order.transition(OrderState.ACK, "PAPER_TEST_HARNESS")
         order.filled_qty = order.quantity
         order.avg_price = order.price or "0"
-        order.transition(OrderState.FILLED, "PAPER simulated fill")
+        order.transition(OrderState.FILLED, "PAPER_TEST_HARNESS")
         return order
 
     def _next_paper_id(self) -> int:
