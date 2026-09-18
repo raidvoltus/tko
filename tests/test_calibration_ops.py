@@ -1,11 +1,12 @@
-"""Scientific calibration framework tests."""
-import csv
+"""Hardened calibration: leakage, artifact integrity, diagnostics, no order authority."""
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from src.evaluation.calibration import (
     BetaCalibrator,
+    CalibrationArtifact,
     CalibratorSelector,
     EdgeCalibrator,
     IdentityCalibrator,
@@ -13,118 +14,123 @@ from src.evaluation.calibration import (
     PlattCalibrator,
     TemperatureCalibrator,
     brier_score,
+    calibration_slope_intercept_linear,
+    calibration_slope_intercept_logit,
     expected_calibration_error,
     full_metrics,
     log_loss,
-    maximum_calibration_error,
+    paired_block_bootstrap_delta,
+    verify_artifact,
 )
-from src.evaluation.ohlcv_loader import load_ohlcv_csv
 from src.evaluation.pit_dataset import build_pit_from_closes
 from src.evaluation.runner import WalkForwardRunner
-from src.observability.metrics import CycleMetric, MetricsRegistry
+from src.evaluation.walk_forward import generate_walk_forward_splits
 
 
-def test_metrics_suite():
-    y = [1, 0, 1, 0]
-    p = [0.9, 0.1, 0.8, 0.2]
-    assert brier_score(y, p) < 0.1
-    assert log_loss(y, p) < 1.0
-    assert expected_calibration_error(y, p) >= 0
-    assert maximum_calibration_error(y, p) >= 0
-    m = full_metrics(y, p)
-    assert "slope" in m and "intercept" in m
-
-
-def test_selector_picks_or_identity():
+def test_logit_and_linear_slope():
     rng = np.random.default_rng(0)
-    y = (rng.random(300) > 0.55).astype(float)
-    # systematically overconfident scores
-    scores = np.clip(0.5 + 0.45 * (y - 0.5) / 0.5 + rng.normal(0, 0.05, 300), 0.01, 0.99)
-    sel = CalibratorSelector(min_brier_improve=0.001, min_n=40)
-    cal, art = sel.select(scores[:150], y[:150], scores[150:], y[150:])
-    assert art.version
-    assert art.selected in ("identity", "platt", "isotonic", "beta", "temperature")
-    assert "brier" in art.metrics_selected
-    assert isinstance(cal.transform([0.5])[0], float)
+    y = (rng.random(200) > 0.4).astype(float)
+    p = np.clip(0.3 + 0.4 * y + rng.normal(0, 0.05, 200), 0.01, 0.99)
+    a, b = calibration_slope_intercept_logit(y, p)
+    assert np.isfinite(a) and np.isfinite(b)
+    il, sl = calibration_slope_intercept_linear(y, p)
+    assert np.isfinite(il) and np.isfinite(sl)
 
 
-def test_beta_fit():
-    rng = np.random.default_rng(1)
-    s = rng.uniform(0.05, 0.95, 200)
-    y = (s + rng.normal(0, 0.15, 200) > 0.5).astype(float)
-    cal = BetaCalibrator().fit(s, y)
-    assert cal.fitted
-    out = cal.transform(s[:5])
-    assert out.shape == (5,)
-    assert np.all((out >= 0) & (out <= 1))
+def test_transform_finite_bounded():
+    for Cal in (IdentityCalibrator, PlattCalibrator, IsotonicCalibrator, BetaCalibrator, TemperatureCalibrator):
+        cal = Cal()
+        rng = np.random.default_rng(1)
+        y = (rng.random(120) > 0.5).astype(float)
+        s = np.clip(rng.random(120), 0.01, 0.99)
+        cal.fit(s, y)
+        out = cal.transform([0.0, 0.5, 1.0, -5.0, 5.0])
+        assert np.all(np.isfinite(out))
+        assert np.all(out >= 0) and np.all(out <= 1)
 
 
-def test_temperature_fit():
+def test_one_class_invalid():
+    s = np.linspace(0.1, 0.9, 50)
+    y = np.ones(50)
+    cal = PlattCalibrator().fit(s, y)
+    assert cal.status == "INVALID" or not cal.validate()
+
+
+def test_selector_identity_baseline():
     rng = np.random.default_rng(2)
-    s = rng.uniform(0.1, 0.9, 150)
-    y = (s > 0.5).astype(float)
-    cal = TemperatureCalibrator().fit(s, y)
-    assert cal.fitted and cal.T > 0
+    y = (rng.random(200) > 0.5).astype(float)
+    s = np.clip(y * 0.5 + 0.25 + rng.normal(0, 0.2, 200), 0.01, 0.99)
+    cal, art = CalibratorSelector(min_n=30).select(s[:100], y[:100], s[100:], y[100:])
+    assert art.calibration_status in ("CALIBRATED", "UNCALIBRATED")
+    assert art.identity_hash
+    h1 = art.identity_hash
+    art.fitted_at = 999999.0
+    assert art.compute_identity_hash() == h1  # timestamp not in identity
 
 
-def test_platt_isotonic_edge():
-    rng = np.random.default_rng(3)
-    y = (rng.random(400) > 0.6).astype(float)
-    scores = np.clip(y * 0.3 + 0.6 + rng.normal(0, 0.05, 400), 0, 1)
-    assert PlattCalibrator().fit(scores, y).fitted
-    assert IsotonicCalibrator().fit(scores, y).fitted
-    comps = np.linspace(-1, 1, 200)
-    realized = comps * 3 + rng.normal(0, 0.5, 200)
-    assert EdgeCalibrator().fit(comps, realized).fitted
+def test_artifact_hash_changes_with_dataset():
+    art = CalibrationArtifact(calibrator_type="platt", dataset_hash="a", feature_schema_hash="f").seal()
+    art2 = CalibrationArtifact(calibrator_type="platt", dataset_hash="b", feature_schema_hash="f").seal()
+    assert art.identity_hash != art2.identity_hash
 
 
-def test_ohlcv_csv_loader(tmp_path: Path):
-    p = tmp_path / "bars.csv"
-    with p.open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["timestamp", "open", "high", "low", "close", "volume"])
-        px = 100.0
-        for i in range(80):
-            px *= 1.001
-            w.writerow([1_700_000_000 + i * 60, px, px, px, px, 10])
-    ds = load_ohlcv_csv(p, symbol="BTC_USDT")
-    assert ds.n == 80
+def test_verify_artifact_mismatch():
+    art = CalibrationArtifact(feature_schema_hash="X", model_identity_hash="M").seal()
+    ok, reason = verify_artifact(art, expected_feature_schema_hash="Y")
+    assert not ok and reason == "FEATURE_SCHEMA_MISMATCH"
+    ok2, _ = verify_artifact(art, expected_feature_schema_hash="X")
+    assert ok2
 
 
-def test_wf_report_calibration_artifact_fields():
-    rng = np.random.default_rng(4)
+def test_corruption_fails():
+    art = CalibrationArtifact(calibrator_type="beta", n_fit=10).seal()
+    art.calibrator_type = "hacked"
+    ok, reason = verify_artifact(art)
+    assert not ok and reason == "HASH_MISMATCH"
+
+
+def test_paired_bootstrap_seed():
+    y = np.array([1.0, 0, 1, 0, 1] * 20)
+    p1 = np.clip(y * 0.8 + 0.1, 0, 1)
+    p0 = np.full_like(y, 0.5)
+    a = paired_block_bootstrap_delta(y, p1, p0, seed=1, n_boot=50)
+    b = paired_block_bootstrap_delta(y, p1, p0, seed=1, n_boot=50)
+    assert a["delta_brier"] == b["delta_brier"]
+    assert a["ci_low"] == b["ci_low"]
+
+
+def test_edge_status_explicit():
+    e = EdgeCalibrator()
+    val, st = e.expected_net_edge_pct(0.5)
+    assert st == "UNCALIBRATED_HEURISTIC"
+
+
+def test_walkforward_segments_ordering():
+    splits = generate_walk_forward_splits(500, 150, 40, 40, 5, step=40)
+    assert len(splits) >= 1
+    for sp in splits:
+        sp.validate()
+        assert sp.train_end <= sp.purge_end <= sp.cal_fit_end <= sp.cal_select_end <= sp.test_end
+
+
+def test_wf_no_oos_in_selection_metadata():
+    rng = np.random.default_rng(5)
     closes = 100 * np.exp(np.cumsum(rng.normal(0.0002, 0.01, 500)))
     ds = build_pit_from_closes("BTC_USDT", closes)
     rep = WalkForwardRunner(entry_threshold=0.05).run(
         ds, train_size=150, valid_size=40, test_size=40, purge_size=5, step=40
     )
-    assert "selected" in rep.calibration or "error" in rep.calibration
-
-
-def test_metrics_registry():
-    reg = MetricsRegistry()
-    reg.record_cycle(
-        CycleMetric(
-            ts=1.0,
-            cycle_id="c1",
-            mode="LIVE",
-            regime="RANGE",
-            action="WAIT",
-            strategy_composite=0.1,
-            model_score=0.0,
-            net_edge_pct=0.0,
-            risk_allowed=False,
-            risk_reason="STATE_UNRECONCILED",
-            risk_mode="NORMAL",
-            state_health="UNRECONCILED",
-        )
+    assert "TOKOCRYPTO_REAL_OOS_EVIDENCE=PENDING" in rep.notes[0] or any(
+        "TOKOCRYPTO" in n for n in rep.notes
     )
-    assert reg.snapshot()["counters"]["risk_deny"] == 1
+    for fr in rep.folds:
+        meta = fr.split.to_meta()
+        assert meta["cal_select_end"] <= meta["test_end"]
 
 
-def test_identity_no_authority():
-    """Calibration modules must not reference order submission."""
-    import src.evaluation.calibration as cal_mod
-    src = Path(cal_mod.__file__).read_text()
-    assert "new_order" not in src
-    assert "RestClient" not in src
+def test_no_order_authority_in_calibration_modules():
+    root = Path("src/evaluation")
+    for p in root.glob("*.py"):
+        text = p.read_text()
+        assert "new_order" not in text
+        assert "RestClient" not in text

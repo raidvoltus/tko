@@ -17,11 +17,16 @@ from src.evaluation.calibration import (
     EdgeCalibrator,
     CalibratorSelector,
     CalibrationArtifact,
+    verify_artifact,
     expected_calibration_error,
     maximum_calibration_error,
     brier_score,
     log_loss,
     full_metrics,
+    calibration_slope_intercept_logit,
+    calibration_slope_intercept_linear,
+    paired_block_bootstrap_delta,
+    CALIBRATION_CODE_VERSION,
 )
 from src.evaluation.ohlcv_loader import load_ohlcv_csv
 
@@ -48,10 +53,15 @@ __all__ = [
     "EdgeCalibrator",
     "CalibratorSelector",
     "CalibrationArtifact",
+    "verify_artifact",
     "expected_calibration_error",
     "maximum_calibration_error",
     "brier_score",
     "log_loss",
     "full_metrics",
+    "calibration_slope_intercept_logit",
+    "calibration_slope_intercept_linear",
+    "paired_block_bootstrap_delta",
+    "CALIBRATION_CODE_VERSION",
     "load_ohlcv_csv",
 ]

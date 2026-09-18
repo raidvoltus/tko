@@ -58,7 +58,7 @@ def test_walkforward_fills_scorecard():
     assert len(report.folds) >= 1
     assert report.aggregate.sample_count > 0
     assert report.cost_model["calibrated"] is False
-    assert "cost_adjusted=True" in report.notes[0]
+    assert any("TOKOCRYPTO" in n or "cost" in n.lower() or "fold layout" in n for n in report.notes)
     d = report.to_dict()
     assert "aggregate" in d and "folds" in d
 

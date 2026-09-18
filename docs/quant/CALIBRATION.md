@@ -1,37 +1,46 @@
-# TKO Calibration Framework
+# TKO Scientific Calibration Framework
 
-## Principle
+## Absolute rules
 
-Calibration improves **honesty of probabilities**, not automatic profitability.
-It has **no order authority**. Pipeline:
+- Calibration ≠ profitability
+- Ranking ≠ calibrated probability
+- **No order authority** (no `new_order`, no RestClient)
+- RiskEngine remains absolute ALLOW/DENY
+- Identity baseline ≠ calibrated
+
+`TOKOCRYPTO_REAL_OOS_EVIDENCE = PENDING` until real exchange OOS is run.
+
+## Fold layout (leakage-safe)
 
 ```
-Raw score → OOF/PIT candidates (Platt | Isotonic | Beta | Temperature | Identity)
-         → select by Brier → log_loss → ECE (must beat identity by min_brier_improve)
-         → CalibrationArtifact (versioned)
-         → expected edge (optional EdgeCalibrator)
-         → Ensemble / Governor (policy)
-         → RiskEngine ALLOW/DENY
-         → LIVE Execution
+TRAIN | PURGE | CAL_FIT | CAL_SELECT | TEST(OOS)
 ```
 
-## References
+OOS never enters fit or selection.
 
-- Fonseca & Lopes (2017) PD calibration, time-series recalibration
-- Guo et al. (2017) temperature scaling, ECE
-- Kull et al. (2017) beta calibration
-- AFML / trading: leakage-free OOF, economic impact of miscalibration
+## Candidates & selection
 
-## Selection rule
+Identity | Platt | Isotonic | Beta | Temperature
 
-**Not** `n < 200 → Platt`.  
-**Yes** candidate fit on cal fold → score on selection fold → proper scoring rules.
+Order: **Brier → log_loss → ECE** on selection segment only.  
+Require `min_brier_improve` vs identity; else `UNCALIBRATED`.
 
-## Walk-forward
+## Diagnostics
 
-TRAIN → PURGE → CAL fit → CAL select → TEST OOS (per `WalkForwardRunner`).
+- Brier, log_loss, ECE, MCE (equal-width + quantile ECE)
+- **Logit** slope/intercept (primary): logit P = α + β logit p
+- Linear slope/intercept (auxiliary)
+- Paired **block bootstrap** ΔBrier CI (not claimed as significance test alone)
 
-## Files
+## Artifact
 
-- `src/evaluation/calibration.py` — metrics, calibrators, `CalibratorSelector`, `CalibrationArtifact`
-- `src/evaluation/runner.py` — hooks selector on validation halves
+`CalibrationArtifact` with `identity_hash` = SHA256(canonical payload **excluding** `fitted_at`).  
+`verify_artifact()` fails closed on hash/schema/model/dataset mismatch.
+
+## EdgeCalibrator
+
+Status: `UNCALIBRATED_HEURISTIC` | `CALIBRATED_OOS` — never silent.
+
+## Live path
+
+Raw score → artifact (if valid) → evidence → Governor → **RiskEngine** → Execution LIVE
