@@ -1,8 +1,6 @@
 """Frozen-aware path resolution."""
-from pathlib import Path
-import sys
 
-from src.utils.paths import ensure_default_config, install_dir, program_data_dir, resolve_config_path
+from src.utils.paths import ensure_default_config, install_dir, resolve_config_path
 
 
 def test_install_dir_dev():

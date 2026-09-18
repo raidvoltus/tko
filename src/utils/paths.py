@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 # Minimal fail-safe config if no template is bundled
 _MINIMAL_CONFIG_YAML = b"""# Auto-generated default - edit ProgramData/TKO/config/config.yaml

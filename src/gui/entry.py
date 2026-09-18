@@ -20,8 +20,8 @@ logger = logging.getLogger("tko.gui")
 
 def _require_tkinter() -> None:
     try:
-        import tkinter  # noqa: F401
         import _tkinter  # noqa: F401
+        import tkinter  # noqa: F401
     except ModuleNotFoundError as e:
         raise SystemExit(
             "TKO-GUI requires tkinter/_tkinter.\n"

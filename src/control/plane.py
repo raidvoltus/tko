@@ -44,7 +44,7 @@ def atomic_write(path: Path, data: bytes) -> None:
 
 class ControlPlane:
     def __init__(self, root: Optional[Path] = None):
-        from src.utils.paths import ensure_default_config, program_data_dir, resolve_config_path, state_root
+        from src.utils.paths import ensure_default_config, resolve_config_path, state_root
 
         data = state_root()
         self.state_dir = data / "state"
