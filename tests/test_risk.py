@@ -1,6 +1,5 @@
 """Adversarial + boundary RiskEngine tests — fail-closed, authoritative reduce-only."""
 import threading
-import time
 
 from src.risk.engine import RiskEngine, RiskLimits, RiskMode, RiskStateHealth
 
