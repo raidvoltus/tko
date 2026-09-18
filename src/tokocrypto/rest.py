@@ -146,7 +146,30 @@ class RestClient:
         return body
 
     def exchange_info(self) -> Dict:
-        st, body, _ = self._request("GET", "/open/v1/common/symbols")
+        """Fetch tradeable symbols. Tries common Tokocrypto shapes."""
+        st, body, resp = self._request("GET", "/open/v1/common/symbols")
+        if not isinstance(body, dict):
+            body = {"error": "non_dict_body", "status": str(st)}
+        body.setdefault("_http_status", getattr(resp, "status_code", None) if resp is not None else None)
+        body.setdefault("_client_status", str(st))
+        # some deployments require symbolType
+        raw_ok = False
+        data = body.get("data")
+        if isinstance(data, list) and data:
+            raw_ok = True
+        if isinstance(data, dict) and any(isinstance(data.get(k), list) and data.get(k) for k in ("list", "symbols")):
+            raw_ok = True
+        if isinstance(body.get("symbols"), list) and body["symbols"]:
+            raw_ok = True
+        if not raw_ok:
+            st2, body2, resp2 = self._request(
+                "GET", "/open/v1/common/symbols", {"symbolType": 1}
+            )
+            if isinstance(body2, dict) and body2:
+                body2.setdefault("_http_status", getattr(resp2, "status_code", None) if resp2 is not None else None)
+                body2.setdefault("_client_status", str(st2))
+                body2.setdefault("_fallback", "symbolType=1")
+                return body2
         return body
 
     def ticker(self, symbol: str) -> Dict:

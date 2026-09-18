@@ -91,25 +91,55 @@ class AssetScanner:
         self.blacklist = set(blacklist or [])
         self.max_symbols = max_symbols
 
+    @staticmethod
+    def extract_symbol_list(exchange_info: Dict[str, Any]) -> List[Any]:
+        """Normalize Tokocrypto / Binance-like exchangeInfo shapes to a list of symbol dicts."""
+        if not isinstance(exchange_info, dict):
+            return []
+        # direct list
+        for key in ("symbols", "list"):
+            v = exchange_info.get(key)
+            if isinstance(v, list):
+                return v
+        data = exchange_info.get("data")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("list", "symbols", "symbolList", "items"):
+                v = data.get(key)
+                if isinstance(v, list):
+                    return v
+        return []
+
     def scan(self, exchange_info: Dict[str, Any], tickers: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Return list of tradeable symbol dicts bounded by max_symbols."""
-        raw = exchange_info.get("data") or exchange_info.get("symbols") or []
-        if not isinstance(raw, list):
+        raw = self.extract_symbol_list(exchange_info)
+        if not isinstance(raw, list) or not raw:
+            logger.warning(
+                "symbol scan: empty list (top_keys=%s data_type=%s)",
+                list(exchange_info.keys())[:12] if isinstance(exchange_info, dict) else type(exchange_info),
+                type(exchange_info.get("data")) if isinstance(exchange_info, dict) else None,
+            )
             return []
         out: List[Dict[str, Any]] = []
         for s in raw:
             if not isinstance(s, dict):
                 continue
-            sym = s.get("symbol") or ""
+            sym = str(s.get("symbol") or s.get("symbolName") or "").strip()
+            if not sym:
+                continue
+            # normalize BTCUSDT -> BTC_USDT when assets known
             status = str(s.get("status", s.get("symbolStatus", "TRADING"))).upper()
-            if status not in ("TRADING", "1", "ACTIVE", ""):
+            if status not in ("TRADING", "1", "ACTIVE", "ENABLED", ""):
                 continue
-            if self.whitelist and sym not in self.whitelist:
+            quote = str(s.get("quoteAsset") or s.get("quote") or "").upper()
+            base = str(s.get("baseAsset") or s.get("base") or "").upper()
+            if "_" not in sym and base and quote and sym.upper() == f"{base}{quote}":
+                sym = f"{base}_{quote}"
+            if self.whitelist and sym not in self.whitelist and sym.replace("_", "") not in {w.replace("_", "") for w in self.whitelist}:
                 continue
-            if sym in self.blacklist:
+            if sym in self.blacklist or sym.replace("_", "") in {b.replace("_", "") for b in self.blacklist}:
                 continue
-            quote = s.get("quoteAsset") or ""
-            base = s.get("baseAsset") or ""
             if self.prefer_quote and quote not in self.prefer_quote:
                 # still allow if high volume later; for now soft prefer
                 pass

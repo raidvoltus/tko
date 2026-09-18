@@ -46,20 +46,21 @@ class ControlPlane:
     def __init__(self, root: Optional[Path] = None):
         from src.utils.paths import ensure_default_config, program_data_dir, resolve_config_path, state_root
 
-        if root is not None:
+        data = state_root()
+        self.state_dir = data / "state"
+        self.audit_dir = data / "audit"
+        # Prefer explicit root only if its config exists; else frozen-aware ProgramData/install
+        if root is not None and (Path(root) / "config" / "config.yaml").is_file():
             self.root = Path(root)
             self.config_path = self.root / "config" / "config.yaml"
-            self.state_dir = self.root / "state"
-            self.audit_dir = self.root / "audit"
         else:
-            # Frozen-aware: config beside EXE or ProgramData; state always ProgramData
-            data = state_root()
+            if root is not None:
+                logger.warning(
+                    "Ignoring invalid config root %s (no config.yaml) — using ProgramData/install paths",
+                    root,
+                )
             self.root = data
-            self.config_path = resolve_config_path()
-            # materialize template on first run
-            self.config_path = ensure_default_config(self.config_path)
-            self.state_dir = data / "state"
-            self.audit_dir = data / "audit"
+            self.config_path = ensure_default_config(resolve_config_path())
         self.kill_path = self.state_dir / "kill_switch.flag"
         self.registry_path = self.state_dir / "model_registry.json"
         self.flags_path = self.state_dir / "feature_flags.json"
@@ -70,8 +71,16 @@ class ControlPlane:
 
     def load_config(self) -> Dict[str, Any]:
         if not self.config_path.exists():
-            logger.error("config.yaml missing — fail-closed")
-            raise FileNotFoundError(str(self.config_path))
+            from src.utils.paths import describe_config_search, ensure_default_config
+            logger.error(
+                "config.yaml missing at %s — search: %s",
+                self.config_path,
+                describe_config_search(),
+            )
+            self.config_path = ensure_default_config()
+            if not self.config_path.exists():
+                raise FileNotFoundError(str(self.config_path))
+            logger.info("Materialized config at %s", self.config_path)
         raw = self.config_path.read_bytes()
         self.config_hash = _sha256_bytes(raw)
         if yaml is None:

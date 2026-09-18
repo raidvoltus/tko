@@ -160,11 +160,36 @@ class Autopilot:
         if not self.symbols_cache:
             try:
                 info = self.rest.exchange_info()
-                self.symbols_cache = self.scanner.scan(info)
+                self.symbols_cache = self.scanner.scan(info if isinstance(info, dict) else {})
+                if not self.symbols_cache:
+                    # config fallback so LIVE/PAPER can still operate on majors
+                    fb = list((self.cfg.get("symbols") or {}).get("fallback") or [])
+                    if not fb:
+                        fb = ["BTC_USDT", "ETH_USDT", "BNB_USDT", "SOL_USDT"]
+                    self.symbols_cache = [
+                        {"symbol": s, "base": s.split("_")[0], "quote": s.split("_")[-1], "raw": {}, "quote_volume": 0.0}
+                        for s in fb
+                    ]
+                    err = ""
+                    if isinstance(info, dict):
+                        err = str(info.get("error") or info.get("msg") or info.get("code") or "")
+                        err += f" http={info.get('_http_status')} keys={list(info.keys())[:8]}"
+                    self._log(
+                        f"Scanned 0 from API — using fallback {len(self.symbols_cache)} symbols ({err})",
+                        "WARN",
+                    )
+                else:
+                    self.rotation.router.set_pairs(self.symbols_cache)
+                    self._log(f"Scanned {len(self.symbols_cache)} symbols")
                 self.rotation.router.set_pairs(self.symbols_cache)
-                self._log(f"Scanned {len(self.symbols_cache)} symbols")
             except Exception as e:
                 self._log(f"symbol scan failed: {e}", "WARN")
+                fb = list((self.cfg.get("symbols") or {}).get("fallback") or ["BTC_USDT", "ETH_USDT"])
+                self.symbols_cache = [
+                    {"symbol": s, "base": s.split("_")[0], "quote": s.split("_")[-1], "raw": {}, "quote_volume": 0.0}
+                    for s in fb
+                ]
+                self.rotation.router.set_pairs(self.symbols_cache)
 
         # 2) balances (REST) — optional if no keys
         if self.rest.api_key and self.rest.api_secret:

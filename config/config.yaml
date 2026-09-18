@@ -80,3 +80,10 @@ paths:
 # Real exchange balances appear only after LIVE credentials + successful account REST.
 paper:
   wallet_usdt: 0
+
+symbols:
+  whitelist: []
+  blacklist: []
+  prefer_quote: ["USDT", "IDR"]
+  max_symbols_scan: 40
+  fallback: ["BTC_USDT", "ETH_USDT", "BNB_USDT", "SOL_USDT", "XRP_USDT"]
