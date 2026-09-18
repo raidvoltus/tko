@@ -148,6 +148,65 @@ class Autopilot:
             sleep_for = max(1.0, interval - elapsed)
             self._stop.wait(sleep_for)
 
+
+    @staticmethod
+    def _extract_balances(body: Dict[str, Any]) -> Optional[Dict[str, Dict[str, float]]]:
+        """Normalize Tokocrypto account payload to {ASSET: {free, locked}}."""
+        if not isinstance(body, dict):
+            return None
+        candidates = []
+        data = body.get("data")
+        if isinstance(data, list):
+            candidates.append(data)
+        if isinstance(data, dict):
+            for k in ("balances", "balance", "list", "spotBalances", "assets"):
+                v = data.get(k)
+                if isinstance(v, list):
+                    candidates.append(v)
+        for k in ("balances", "balance", "list"):
+            v = body.get(k)
+            if isinstance(v, list):
+                candidates.append(v)
+        raw = None
+        for c in candidates:
+            if isinstance(c, list):
+                raw = c
+                if c:
+                    break
+        if not isinstance(raw, list):
+            return None
+        out: Dict[str, Dict[str, float]] = {}
+        for b in raw:
+            if not isinstance(b, dict):
+                continue
+            asset = str(b.get("asset") or b.get("coin") or b.get("currency") or "").upper()
+            if not asset:
+                continue
+            try:
+                free = float(b.get("free") or b.get("available") or b.get("avail") or 0)
+                locked = float(b.get("locked") or b.get("freeze") or b.get("frozen") or 0)
+            except (TypeError, ValueError):
+                continue
+            if free + locked > 0:
+                out[asset] = {"free": free, "locked": locked}
+        return out
+
+    @staticmethod
+    def _parse_ticker_price(tick: Dict[str, Any]) -> float:
+        if not isinstance(tick, dict):
+            return 0.0
+        data = tick.get("data") if isinstance(tick.get("data"), dict) else tick
+        if not isinstance(data, dict):
+            data = tick
+        for k in ("last", "lastPrice", "price", "c", "close", "bid", "ask"):
+            v = data.get(k)
+            try:
+                if v is not None and float(v) > 0:
+                    return float(v)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
     def run_cycle(self) -> Dict[str, Any]:
         """One full autopilot cycle — bounded work for i3/8GB."""
         t0 = time.time()
@@ -191,40 +250,41 @@ class Autopilot:
                 ]
                 self.rotation.router.set_pairs(self.symbols_cache)
 
-        # 2) balances (REST) — optional if no keys
-        if self.rest.api_key and self.rest.api_secret:
+        # 2) balances (REST signed) — only when API credentials present
+        if not (self.rest.api_key and self.rest.api_secret):
+            if self.balance_source != "PAPER_WALLET":
+                self.balance_source = "NO_CREDENTIALS"
+        else:
             try:
                 st, body = self.rest.account()
-                data = body.get("data") or body
-                bals = data.get("balances") or data.get("balance") or []
-                if isinstance(bals, list):
-                    self.balances = {}
-                    for b in bals:
-                        asset = str(b.get("asset") or b.get("coin") or "").upper()
-                        if not asset:
-                            continue
-                        free = float(b.get("free") or b.get("available") or 0)
-                        locked = float(b.get("locked") or 0)
-                        if free + locked > 0:
-                            self.balances[asset] = {"free": free, "locked": locked}
-                    self.balance_source = "LIVE_REST"
+                bals = self._extract_balances(body if isinstance(body, dict) else {})
+                if bals is None:
+                    self.balance_source = "FETCH_FAILED"
+                    self._log(
+                        f"account parse failed st={st} keys={list(body.keys())[:8] if isinstance(body, dict) else type(body)}",
+                        "WARN",
+                    )
                 else:
-                    self.balance_source = "EMPTY"
+                    self.balances = bals
+                    self.balance_source = "LIVE_REST"
+                    self._log(f"account sync LIVE_REST n={len(bals)} assets={list(bals.keys())[:12]}")
             except Exception as e:
                 self._log(f"account fetch failed: {e}", "WARN")
                 self.balance_source = "FETCH_FAILED"
 
-        # 3) prices for held assets + majors
+        # 3) prices for held assets + targets (needed for value_usdt filter)
         for asset in list(self.balances.keys()) + ["BTC", "ETH", "USDT"]:
-            if asset in ("USDT", "USDC"):
-                self.prices[asset] = 1.0
+            asset_u = str(asset).upper()
+            if asset_u in ("USDT", "USDC", "BUSD", "USD"):
+                self.prices[asset_u] = 1.0
                 continue
-            # try pair ASSET_USDT
-            sym = f"{asset}_USDT"
+            if float(self.prices.get(asset_u) or 0) > 0:
+                continue
             try:
-                # lightweight: use last known or skip
-                if asset not in self.prices:
-                    self.prices[asset] = self.prices.get(asset, 0.0)
+                tick = self.rest.ticker(f"{asset_u}_USDT")
+                px = self._parse_ticker_price(tick if isinstance(tick, dict) else {})
+                if px > 0:
+                    self.prices[asset_u] = px
             except Exception:
                 pass
 
