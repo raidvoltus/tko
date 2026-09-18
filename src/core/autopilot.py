@@ -414,7 +414,11 @@ class Autopilot:
         }
         self.journal.write_cycle(cycle)
         self.last_cycle = cycle
-        self._log(f"Cycle {cycle_id} hold={plan.hold} reason={plan.reason}")
+        self._log(
+            f"Cycle {cycle_id} hold={plan.hold} reason={plan.reason} "
+            f"bal_src={getattr(self, 'balance_source', '?')} "
+            f"n_bal={len(getattr(self, 'balances', {}) or {})}"
+        )
         return cycle
 
 
