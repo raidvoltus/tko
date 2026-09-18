@@ -2,13 +2,13 @@
 import numpy as np
 import pytest
 
+from src.champion.promotion import PromotionGate
 from src.evaluation.pit_dataset import (
     assert_feature_label_alignment,
     build_pit_from_closes,
     schema_hash,
 )
 from src.evaluation.runner import WalkForwardRunner, compare_champion_challenger
-from src.champion.promotion import PromotionGate
 
 
 def _series(n=400, seed=0):
