@@ -417,6 +417,19 @@ class Autopilot:
         self._log(f"Cycle {cycle_id} hold={plan.hold} reason={plan.reason}")
         return cycle
 
+
+    def _format_positions_for_gui(self, c: Dict[str, Any]) -> list:
+        """Human-readable positions for GUI; never invent balances."""
+        ps = c.get("portfolio_snapshot") or {}
+        src = ps.get("balance_source") or getattr(self, "balance_source", "EMPTY")
+        assets = ps.get("assets") or {}
+        if not assets:
+            return [f"(no balances — source={src})"]
+        rows = [f"{a}: {float(v):.4f} USDT" for a, v in assets.items()]
+        if src != "LIVE_REST":
+            rows.insert(0, f"[NOT exchange balance: {src}]")
+        return rows
+
     def snapshot_for_gui(self) -> Dict[str, Any]:
         c = self.last_cycle or {}
         return {
