@@ -2,7 +2,6 @@
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from src.evaluation.calibration import (
     BetaCalibrator,
@@ -13,12 +12,8 @@ from src.evaluation.calibration import (
     IsotonicCalibrator,
     PlattCalibrator,
     TemperatureCalibrator,
-    brier_score,
     calibration_slope_intercept_linear,
     calibration_slope_intercept_logit,
-    expected_calibration_error,
-    full_metrics,
-    log_loss,
     paired_block_bootstrap_delta,
     verify_artifact,
 )
