@@ -384,7 +384,10 @@ class PortfolioRotationEngine:
                     hold = False
                     reason = f"rotate {selected.from_asset}->{selected.to_asset} net={selected.net_opportunity_pct:.3f}%"
         elif not opps:
-            reason = "no_candidates"
+            if not holdings:
+                reason = "no_candidates_empty_balance"
+            else:
+                reason = "no_candidates"
 
         return RotationPlan(cycle_id, opps[:10], selected, hold, reason)
 
