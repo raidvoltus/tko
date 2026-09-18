@@ -1,5 +1,15 @@
-"""Hard invariants: strategy/ML/challenger/governor cannot call order endpoints."""
+"""Authority invariants: static scan + runtime capability boundary."""
 from pathlib import Path
+
+import numpy as np
+
+from src.decision.strategies import StrategyEngine
+from src.decision.governor import Governor
+from src.decision.ensemble import Ensemble
+from src.decision.plane import DecisionPlane
+from src.champion.registry import ChampionRegistry
+from src.champion.promotion import PromotionGate
+from src.security.authority import assert_no_execution_capability
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,7 +28,7 @@ def test_strategy_no_new_order():
 def test_governor_no_new_order():
     text = _read("src/decision/governor.py")
     assert "new_order" not in text
-    assert "submit(" not in text or "submit" not in text
+    assert "ExecutionManager" not in text
 
 
 def test_champion_no_new_order():
@@ -46,6 +56,51 @@ def test_new_order_only_in_rest_and_manager():
         for i, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
             if "new_order" in line:
                 sites.append(f"{p.relative_to(ROOT)}:{i}")
-    assert sites, "expected new_order sites"
+    assert sites
     for s in sites:
         assert "rest.py" in s or "manager.py" in s, s
+
+
+def test_runtime_strategy_has_no_execution_capability():
+    eng = StrategyEngine()
+    assert_no_execution_capability(eng, "StrategyEngine")
+
+
+def test_runtime_governor_has_no_execution_capability():
+    g = Governor()
+    assert_no_execution_capability(g, "Governor")
+
+
+def test_runtime_ensemble_has_no_execution_capability():
+    e = Ensemble()
+    assert_no_execution_capability(e, "Ensemble")
+
+
+def test_runtime_decision_plane_has_no_execution_capability():
+    dp = DecisionPlane()
+    assert_no_execution_capability(dp, "DecisionPlane")
+    assert_no_execution_capability(dp.strategies, "DecisionPlane.strategies")
+    assert_no_execution_capability(dp.governor, "DecisionPlane.governor")
+    assert_no_execution_capability(dp.ensemble, "DecisionPlane.ensemble")
+
+
+def test_runtime_champion_registry_has_no_execution_capability():
+    reg = ChampionRegistry()
+    assert_no_execution_capability(reg, "ChampionRegistry")
+    gate = PromotionGate()
+    assert_no_execution_capability(gate, "PromotionGate")
+
+
+def test_runtime_violation_detected():
+    class Fake:
+        pass
+    class ExecutionManager:
+        pass
+    f = Fake()
+    f.exec_mgr = ExecutionManager()
+    try:
+        assert_no_execution_capability(f, "Fake")
+        raised = False
+    except RuntimeError as e:
+        raised = "AUTHORITY_VIOLATION" in str(e)
+    assert raised

@@ -11,6 +11,9 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from src.decision.strategies import StrategyEngine, StrategyScores
+from src.decision.ensemble import Ensemble
+from src.decision.edge import cost_adjusted_edge, strategy_score_to_gross_edge
+from src.decision.governor import Governor
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +62,11 @@ class DecisionPlane:
         self.feature_version = feature_version
         self.regime_clf = RegimeClassifier()
         self.strategies = StrategyEngine()
+        self.ensemble = Ensemble(strategy_weight=0.7, model_weight=0.3)
+        self.governor = Governor()
         self.last_signal: Optional[Signal] = None
         self.last_scores: Optional[StrategyScores] = None
+        self.last_governor = None
 
     def evaluate_strategies(
         self,
@@ -90,44 +96,42 @@ class DecisionPlane:
         scores = self.evaluate_strategies(closes, volumes=volumes, rsi=rsi)
         regime = scores.regime
 
-        # Blend ML/heuristic probability with strategy composite when overlay on
+        # Ensemble fuse: strategy composite + optional model score (evidence only)
+        # External `probability` treated as model_score in [-1,1] or [0,1] → map to [-1,1]
+        model_score = None
+        if model_hash and model_hash not in ("none", "heuristic"):
+            # map [0,1]-ish probability to [-1,1] score
+            model_score = float(probability) * 2.0 - 1.0
+        ens = self.ensemble.fuse(scores.composite, model_score)
+        # Cost-adjusted edge from uncalibrated gross heuristic
+        gross = strategy_score_to_gross_edge(ens.confluence_score)
+        edge = cost_adjusted_edge(gross, source="heuristic_uncalibrated", calibrated=False)
+
         prob = float(probability)
         exp_ret = float(expected_return_pct)
         if use_strategy_overlay:
-            strat_prob = self.strategies.probability_from_scores(scores)
-            # 55% strategy confluence / 45% external (ML or heuristic)
-            prob = 0.45 * prob + 0.55 * strat_prob
-            # Prefer strategy expected return when external is near-zero
+            # Prefer confluence score as primary evidence; do not call it calibrated probability
+            strat_score_01 = 0.5 + 0.5 * ens.confluence_score
+            prob = 0.45 * prob + 0.55 * strat_score_01
             if abs(exp_ret) < 1e-9:
-                exp_ret = self.strategies.expected_return_pct(scores)
+                exp_ret = edge.net_edge_pct
             else:
-                exp_ret = 0.5 * exp_ret + 0.5 * self.strategies.expected_return_pct(scores)
+                exp_ret = 0.5 * exp_ret + 0.5 * edge.net_edge_pct
 
-        # Regime-aware action (still no order authority)
-        if regime == "UNKNOWN" or scores.regime_confidence < 0.35:
-            action = "HOLD"
-        elif prob >= 0.58 and net_opportunity_pct > 0 and regime in (
-            "TREND_UP",
-            "RANGE",
-            "MEAN_REVERTING",
-        ):
-            # Mean-reversion BUY only if composite agrees (oversold bounce)
-            if regime == "MEAN_REVERTING" and scores.composite < 0.05:
-                action = "WAIT"
-            else:
-                action = "BUY"
-        elif prob <= 0.42 and net_opportunity_pct > 0 and regime in (
-            "TREND_DOWN",
-            "RANGE",
-            "MEAN_REVERTING",
-        ):
-            if regime == "MEAN_REVERTING" and scores.composite > -0.05:
-                action = "WAIT"
-            else:
-                action = "SELL"
-        elif regime == "VOLATILE" and abs(scores.composite) < 0.35:
-            action = "HOLD"  # avoid chop unless strong breakout score
-        else:
+        # Governor policy (NO order authority). Risk remains separate gate at execution.
+        gov = self.governor.decide(
+            scores,
+            model_score=model_score,
+            edge=edge,
+            data_valid=regime != "UNKNOWN",
+            stale=False,
+            risk_blocked=False,
+            min_net_edge_pct=0.0,
+        )
+        self.last_governor = gov
+        action = gov.action
+        # Align WAIT/NO_TRADE/HOLD with net opportunity floor from rotation
+        if action in ("BUY", "SELL") and net_opportunity_pct <= 0:
             action = "WAIT"
 
         ts = time.time()

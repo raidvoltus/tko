@@ -54,6 +54,8 @@ class PromotionGate:
         cost_adjusted: bool = False,
         reproducible: bool = True,
         risk_limits_unchanged: bool = True,
+        operator_approved: bool = False,
+        degradation_vs_prior: bool = False,
     ) -> Dict[str, Any]:
         reasons: List[str] = []
 
@@ -103,6 +105,12 @@ class PromotionGate:
                     [f"REGIME_COVERAGE:{covered}<{self.cfg.min_regimes_covered}"],
                 )
 
+        if degradation_vs_prior:
+            return self._out(
+                PromotionDecision.REJECT,
+                ["DEGRADATION_GUARD"],
+            )
+
         # Relative improvement required vs champion (net PnL and drawdown)
         if challenger.net_pnl <= champion.net_pnl:
             return self._out(
@@ -115,12 +123,19 @@ class PromotionGate:
                 ["DRAWDOWN_WORSE_THAN_CHAMPION"],
             )
 
-        # Even if metrics look better, require explicit operator confirmation layer
-        # Automatic PROMOTE is never the default in this gate without all checks — still
-        # return ELIGIBLE signal via decision PROMOTE only when all hard gates pass.
+        # Hard statistical/cost gates passed → may become ELIGIBLE only.
+        # PROMOTE requires explicit operator_approved=True (no automatic promotion).
+        if not operator_approved:
+            return {
+                "decision": PromotionDecision.KEEP_CHAMPION.value,
+                "promotion_eligible": True,
+                "promotion_reason": "GATES_PASSED_AWAITING_OPERATOR_APPROVAL",
+                "default_policy": "KEEP_CHAMPION_WHEN_UNCERTAIN",
+                "requires_operator_approval": True,
+            }
         return self._out(
             PromotionDecision.PROMOTE,
-            ["ALL_GATES_PASSED"],
+            ["ALL_GATES_PASSED", "OPERATOR_APPROVED"],
             eligible=True,
         )
 

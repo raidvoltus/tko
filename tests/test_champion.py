@@ -54,6 +54,48 @@ def test_promotion_gate_requires_cost_adjusted():
     assert out["decision"] == PromotionDecision.INSUFFICIENT_EVIDENCE.value
 
 
+def test_promotion_requires_operator_even_when_gates_pass():
+    gate = PromotionGate()
+    champ = Scorecard(sample_count=500, trade_count=50, observation_days=30, net_pnl=1.0, max_drawdown=0.1)
+    chall = Scorecard(
+        sample_count=500, trade_count=50, observation_days=30,
+        net_pnl=5.0, max_drawdown=0.08, sharpe_like=0.5,
+        regime_coverage={"TREND_UP": 0.4, "RANGE": 0.3},
+    )
+    out = gate.evaluate(champ, chall, cost_adjusted=True, operator_approved=False)
+    assert out["promotion_eligible"] is True
+    assert out["decision"] == PromotionDecision.KEEP_CHAMPION.value
+    assert out.get("requires_operator_approval") is True
+    out2 = gate.evaluate(champ, chall, cost_adjusted=True, operator_approved=True)
+    assert out2["decision"] == PromotionDecision.PROMOTE.value
+
+
+def test_registry_promote_requires_operator():
+    reg = ChampionRegistry()
+    from dataclasses import replace
+    m = ChampionManifest.current_production(code_commit="x")
+    reg.set_champion(m)
+    ch = ChallengerManifest(
+        challenger_id="c2", challenger_type="STRATEGY", parent_champion_id=m.champion_id,
+        feature_version="v2", strategy_version="v2", regime_version="v1",
+        config_hash="h", code_commit="x",
+    )
+    reg.register_challenger(ch)
+    for st in (ChallengerState.BACKTESTED, ChallengerState.VALIDATED,
+               ChallengerState.SHADOW_EVALUATED, ChallengerState.ELIGIBLE):
+        assert reg.transition("c2", st)
+    new_m = replace(m, champion_id="tko-champion-v2", code_commit="y")
+    assert not reg.promote("c2", new_m, operator_approved=False)
+    assert reg.promote("c2", new_m, operator_approved=True, approval_ref="ops-1")
+
+
+def test_identity_hash_stable_across_timestamps():
+    from dataclasses import replace
+    a = ChampionManifest.current_production(code_commit="c1", feature_schema_hash="f1")
+    b = replace(a, created_at=a.created_at + 999, effective_from=a.effective_from + 999)
+    assert a.identity_hash() == b.identity_hash()
+
+
 def test_rollback():
     reg = ChampionRegistry()
     a = ChampionManifest.current_production(code_commit="a")

@@ -64,3 +64,28 @@ Strategy composite is **not** a calibrated expected return.
 ## Walk-forward
 
 `generate_walk_forward_splits`: train → purge → validation → test (no random split).
+
+
+## Hardening notes (post-4a72d3c)
+
+### Champion identity
+`identity_hash()` excludes `created_at` / `effective_from` so identity is stable and
+reproducible from schema/config/model/commit hashes.
+
+### Promotion is never automatic
+`PromotionGate.evaluate(..., operator_approved=False)` may set `promotion_eligible=True`
+but decision remains **KEEP_CHAMPION** until operator approval.
+
+`ChampionRegistry.promote(..., operator_approved=True, approval_ref=...)` is required.
+
+### Expected edge terminology
+- **Cost-adjusted edge**: PASS (fee/spread/slip/impact/exec/vol deducted)
+- **Calibrated expected return**: NOT YET (needs PIT historical calibration)
+
+### Production vs non-production modes
+- **LIVE**: production trading path
+- **PAPER/SHADOW**: non-production (unit tests / offline); not production authority
+- Challenger **shadow evaluation** = intelligence only, never execution authority
+
+### Runtime authority boundary
+`src/security/authority.py` — `assert_no_execution_capability` for Strategy/Governor/Ensemble/Registry.

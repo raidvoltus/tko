@@ -72,14 +72,27 @@ class ChampionRegistry:
         self._persist()
         return True
 
-    def promote(self, challenger_id: str, new_champion: ChampionManifest) -> bool:
+    def promote(
+        self,
+        challenger_id: str,
+        new_champion: ChampionManifest,
+        operator_approved: bool = False,
+        approval_ref: str = "",
+    ) -> bool:
+        """Atomic promote — requires ELIGIBLE + explicit operator_approved.
+
+        No caller may promote without operator_approved=True.
+        """
+        if not operator_approved:
+            logger.error("Promote denied: operator_approved required (ref=%s)", approval_ref)
+            return False
         ch = self.challengers.get(challenger_id)
         if not ch or ch.state != ChallengerState.ELIGIBLE.value:
             logger.error("Promote denied: challenger not ELIGIBLE")
             return False
-        if not self.transition(challenger_id, ChallengerState.PROMOTED, "promotion"):
+        if not self.transition(challenger_id, ChallengerState.PROMOTED, f"promotion:{approval_ref}"):
             return False
-        self.set_champion(new_champion, reason=f"promoted_from:{challenger_id}")
+        self.set_champion(new_champion, reason=f"promoted_from:{challenger_id}:op:{approval_ref}")
         return True
 
     def rollback(self) -> bool:

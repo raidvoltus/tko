@@ -38,8 +38,15 @@ class ChampionManifest:
         return asdict(self)
 
     def identity_hash(self) -> str:
+        """Stable production identity — excludes wall-clock timestamps.
+
+        created_at / effective_from are metadata for audit, not identity.
+        Tamper-evident storage (signature) is out of band; identity is reproducible
+        from schema/config/model/commit hashes alone.
+        """
         d = self.to_dict()
-        # exclude timestamps from identity stability if needed — include all for full reconstruct
+        for k in ("created_at", "effective_from"):
+            d.pop(k, None)
         return compute_config_hash(d)
 
     @staticmethod
