@@ -92,6 +92,7 @@ class Autopilot:
         self.symbols_cache: List[Dict[str, Any]] = []
         self.prices: Dict[str, float] = {}
         self.balances: Dict[str, Dict[str, float]] = {}
+        self.balance_source: str = "EMPTY"  # EMPTY | LIVE_REST | PAPER_WALLET | FETCH_FAILED
         self.model_valid = False
         self.logs: List[str] = []
 
@@ -181,8 +182,12 @@ class Autopilot:
                         locked = float(b.get("locked") or 0)
                         if free + locked > 0:
                             self.balances[asset] = {"free": free, "locked": locked}
+                    self.balance_source = "LIVE_REST"
+                else:
+                    self.balance_source = "EMPTY"
             except Exception as e:
                 self._log(f"account fetch failed: {e}", "WARN")
+                self.balance_source = "FETCH_FAILED"
 
         # 3) prices for held assets + majors
         for asset in list(self.balances.keys()) + ["BTC", "ETH", "USDT"]:
@@ -236,7 +241,16 @@ class Autopilot:
             expected[asset] = 0.4 * float(expected.get(asset, 0.0)) + 0.6 * self.decision.strategies.expected_return_pct(sc)
 
         # 5) portfolio snapshot + rotation plan
-        snap = self.rotation.build_snapshot(self.balances or {"USDT": {"free": 100.0, "locked": 0.0}}, self.prices)
+        # Never invent exchange balances. Optional PAPER wallet only if config sets paper_wallet_usdt.
+        bal_for_snap = dict(self.balances)
+        if not bal_for_snap and self.exec_mgr.mode in ("PAPER", "SHADOW"):
+            paper_usdt = float((self.cfg.get("paper") or {}).get("wallet_usdt", 0) or 0)
+            if paper_usdt > 0:
+                bal_for_snap = {"USDT": {"free": paper_usdt, "locked": 0.0}}
+                self.balance_source = "PAPER_WALLET"
+            else:
+                self.balance_source = self.balance_source if self.balance_source == "FETCH_FAILED" else "EMPTY"
+        snap = self.rotation.build_snapshot(bal_for_snap, self.prices)
         plan = self.rotation.plan_cycle(snap, expected, symbols=self.symbols_cache)
 
         # 6) decision signal (primary symbol)
@@ -304,7 +318,7 @@ class Autopilot:
                     order_type=1,
                     quantity=str(round(qty, 6)),
                     price=str(round(px, 2)) if px else "1",
-                    available_balance=snap.available_usdt or 1000,
+                    available_balance=float(snap.available_usdt or 0.0),
                     reference_price=px or 1.0,
                 )
                 order_result = {
@@ -333,7 +347,13 @@ class Autopilot:
             "symbols_scanned": len(self.symbols_cache),
             "portfolio_snapshot": {
                 "total_value_usdt": snap.total_value_usdt,
+                "available_usdt": snap.available_usdt,
+                "balance_source": self.balance_source,
                 "assets": {k: v.value_usdt for k, v in snap.balances.items()},
+                "assets_detail": {
+                    k: {"free": v.free, "locked": v.locked, "value_usdt": v.value_usdt}
+                    for k, v in snap.balances.items()
+                },
             },
             "signal": {
                 "action": signal.action,
@@ -380,8 +400,10 @@ class Autopilot:
             "bot_status": "KILL" if self.risk.kill_switch else ("RUNNING" if self.running else "STOPPED"),
             "balance": {
                 "total": f"{(c.get('portfolio_snapshot') or {}).get('total_value_usdt', 0):.2f}",
-                "available": "—",
+                "available": f"{(c.get('portfolio_snapshot') or {}).get('available_usdt', 0):.2f}",
                 "locked": "—",
+                "source": (c.get("portfolio_snapshot") or {}).get("balance_source")
+                or getattr(self, "balance_source", "EMPTY"),
             },
             "market": {"symbol": "MULTI", "last": "—", "bid": "—", "ask": "—", "status": "SCAN"},
             "signal": {
@@ -392,10 +414,7 @@ class Autopilot:
                 "model_status": "OK" if self.model_valid else "HEURISTIC",
                 "last_pred": c.get("reason", "—"),
             },
-            "positions": [
-                f"{a}: {v:.2f} USDT"
-                for a, v in ((c.get("portfolio_snapshot") or {}).get("assets") or {}).items()
-            ],
+            "positions": self._format_positions_for_gui(c),
             "orders": [],
             "risk": {
                 "daily_pnl": self.risk.daily_pnl,

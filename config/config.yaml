@@ -75,3 +75,8 @@ paths:
   kill_switch: "state/kill_switch.flag"
   model_registry: "state/model_registry.json"
   feature_flags: "state/feature_flags.json"
+
+# Simulated wallet for PAPER/SHADOW only. 0 = show empty (never invent 100 USDT).
+# Real exchange balances appear only after LIVE credentials + successful account REST.
+paper:
+  wallet_usdt: 0

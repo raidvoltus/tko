@@ -134,7 +134,13 @@ class MainWindow:
         lines.append("-" * 70)
         lines.append("ACCOUNT")
         bal = snapshot.get("balance", {})
-        lines.append(f"  Total: {bal.get('total', '—')}  Available: {bal.get('available', '—')}  Locked: {bal.get('locked', '—')}")
+        src = bal.get("source", "UNKNOWN")
+        lines.append(
+            f"  Total: {bal.get('total', '—')}  Available: {bal.get('available', '—')}  "
+            f"Locked: {bal.get('locked', '—')}  Source: {src}"
+        )
+        if src not in ("LIVE_REST",):
+            lines.append("  *** Not live exchange balance (PAPER/EMPTY/failed fetch) ***")
         lines.append("-" * 70)
         lines.append("MARKET")
         m = snapshot.get("market", {})
