@@ -23,6 +23,12 @@ class StrategyScores:
     momentum: float
     mean_reversion: float
     breakout: float
+    trend_score: float
+    regime_fit: float
+    volume_confirmation: float
+    volatility_confirmation: float
+    structure_confirmation: float
+    strategy_confidence: float
     composite: float
     regime: str
     regime_confidence: float
@@ -40,9 +46,15 @@ def _tanh(x: float) -> float:
 
 class RegimeDetector:
     """
-    Multi-signal regime classification.
-    Uses trend (SMA structure), vol percentile proxy, BB width, Hurst-like vol ratio.
+    Multi-signal regime classification with hysteresis.
+    Uses trend structure, vol state, range position, momentum persistence.
+    hurst_proxy is a variance-ratio-like proxy — NOT a true Hurst exponent.
     """
+
+    def __init__(self, persist_bars: int = 3):
+        self.persist_bars = persist_bars
+        self._last_regime = "UNKNOWN"
+        self._streak = 0
 
     def classify(
         self,
@@ -102,6 +114,22 @@ class RegimeDetector:
             regime = "RANGE"
             allowed = ("mean_reversion", "momentum")
             conf = 0.45 + (0.1 if vol5 < vol20 else 0.0)
+
+        # Hysteresis: require persistence before switching (except UNKNOWN/VOLATILE)
+        if regime == self._last_regime:
+            self._streak += 1
+        else:
+            if regime in ("VOLATILE", "UNKNOWN") or self._last_regime in ("UNKNOWN",):
+                self._last_regime = regime
+                self._streak = 1
+            elif self._streak >= self.persist_bars:
+                self._last_regime = regime
+                self._streak = 1
+            else:
+                # keep previous regime until persistence met
+                regime = self._last_regime
+                self._streak += 1
+                conf = max(0.3, conf * 0.85)
 
         return regime, conf, allowed
 
@@ -209,10 +237,25 @@ class StrategyEngine:
             composite = _clip(composite * (0.5 + 0.5 * conf))
             reason = "allowed=" + ",".join(a for a, _, _ in parts)
 
+        # Confirmation channels
+        trend_score = mom
+        structure = abs(mom) * 0.5 + abs(brk) * 0.5
+        vol_conf = 1.0 if regime == "VOLATILE" else (0.7 if regime in ("TREND_UP", "TREND_DOWN") else 0.5)
+        # volume_confirmation passed via breakout already scaled; use |brk| as proxy when no vol
+        vol_confirm = min(1.0, abs(brk) * 1.2)
+        regime_fit = conf
+        strategy_confidence = min(1.0, (abs(composite) + conf) / 2.0)
+
         return StrategyScores(
             momentum=mom,
             mean_reversion=mr,
             breakout=brk,
+            trend_score=trend_score,
+            regime_fit=regime_fit,
+            volume_confirmation=vol_confirm,
+            volatility_confirmation=vol_conf,
+            structure_confirmation=min(1.0, structure),
+            strategy_confidence=strategy_confidence,
             composite=composite,
             regime=regime,
             regime_confidence=conf,

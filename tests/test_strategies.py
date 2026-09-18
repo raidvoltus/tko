@@ -51,6 +51,7 @@ def test_strategy_scores_bounded():
     assert -1.0 <= sc.mean_reversion <= 1.0
     assert -1.0 <= sc.breakout <= 1.0
     assert -1.0 <= sc.composite <= 1.0
+    assert 0.0 <= sc.strategy_confidence <= 1.0
     assert sc.regime
 
 

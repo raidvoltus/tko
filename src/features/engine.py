@@ -14,6 +14,8 @@ FEATURE_VERSION = "v2"
 MAX_DIM = 64
 
 
+
+
 def _safe_div(a: float, b: float, default: float = 0.0) -> float:
     if b == 0 or np.isnan(b) or np.isinf(b):
         return default
@@ -249,3 +251,8 @@ class FeatureEngine:
 
     def features_hash(self, vec: np.ndarray) -> str:
         return hashlib.sha256(vec.tobytes()).hexdigest()[:16]
+
+    @classmethod
+    def schema_hash(cls) -> str:
+        names = ",".join(cls.FEATURE_NAMES)
+        return hashlib.sha256(f"{FEATURE_VERSION}|{names}".encode()).hexdigest()[:32]
