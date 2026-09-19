@@ -10,7 +10,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .auth import build_signed_query, headers, prepare_signed_params
+from .auth import build_signed_query, headers
 
 logger = logging.getLogger(__name__)
 
