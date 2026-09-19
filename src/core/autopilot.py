@@ -310,6 +310,10 @@ class Autopilot:
             self.account_state = self.account_recon.mark_failed("NO_CREDENTIALS")
         else:
             try:
+                try:
+                    self.rest.sync_time()
+                except Exception as e:
+                    self._log(f"time sync warn: {type(e).__name__}", "WARN")
                 st, body = self.rest.account()
                 body = body if isinstance(body, dict) else {}
                 # reject non-success API codes when present

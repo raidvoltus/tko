@@ -10,7 +10,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .auth import headers, prepare_signed_params
+from .auth import build_signed_query, headers, prepare_signed_params
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ class RestClient:
         api_key: str = "",
         api_secret: str = "",
         base_url: str = BASE_URL,
-        recv_window: int = 5000,
+        recv_window: int = 60000,
         timeout: float = 15.0,
         max_retries_on_get: int = 3,
     ):
@@ -42,6 +42,7 @@ class RestClient:
         self.base_url = base_url.rstrip("/")
         self.recv_window = recv_window
         self.timeout = timeout
+        self._time_offset_ms = 0  # server_time - local_time
         self.session = requests.Session()
         # Only retry safe methods. Never auto-retry POST orders.
         retry = Retry(
@@ -80,22 +81,49 @@ class RestClient:
         url = f"{self.base_url}{path}"
         params = dict(params or {})
         hdrs = headers(self.api_key) if self.api_key else {}
+        signed_qs = None
 
         if signed:
             if not self.api_secret:
                 return OrderResultStatus.REJECTED, {"error": "missing api_secret"}, None
-            params = prepare_signed_params(params, self.api_secret, self.recv_window)
+            # Exact query/body string must match HMAC totalParams
+            ts = int(time.time() * 1000) + int(getattr(self, "_time_offset_ms", 0) or 0)
+            signed_qs, params = build_signed_query(
+                params, self.api_secret, self.recv_window, timestamp_ms=ts
+            )
+            hdrs = dict(hdrs)
+            hdrs["Content-Type"] = "application/x-www-form-urlencoded"
 
         try:
             if method.upper() == "GET":
-                resp = self.session.get(url, params=params, headers=hdrs, timeout=self.timeout)
+                if signed and signed_qs is not None:
+                    # Do not let requests re-order params — use pre-built query
+                    resp = self.session.get(
+                        f"{url}?{signed_qs}", headers=hdrs, timeout=self.timeout
+                    )
+                else:
+                    resp = self.session.get(url, params=params, headers=hdrs, timeout=self.timeout)
             elif method.upper() == "POST":
-                # form body
-                resp = self.session.post(url, data=params, headers=hdrs, timeout=self.timeout)
+                if signed and signed_qs is not None:
+                    resp = self.session.post(
+                        url, data=signed_qs, headers=hdrs, timeout=self.timeout
+                    )
+                else:
+                    resp = self.session.post(url, data=params, headers=hdrs, timeout=self.timeout)
             elif method.upper() == "DELETE":
-                resp = self.session.delete(url, params=params, headers=hdrs, timeout=self.timeout)
+                if signed and signed_qs is not None:
+                    resp = self.session.delete(
+                        f"{url}?{signed_qs}", headers=hdrs, timeout=self.timeout
+                    )
+                else:
+                    resp = self.session.delete(url, params=params, headers=hdrs, timeout=self.timeout)
             elif method.upper() == "PUT":
-                resp = self.session.put(url, data=params, headers=hdrs, timeout=self.timeout)
+                if signed and signed_qs is not None:
+                    resp = self.session.put(
+                        url, data=signed_qs, headers=hdrs, timeout=self.timeout
+                    )
+                else:
+                    resp = self.session.put(url, data=params, headers=hdrs, timeout=self.timeout)
             else:
                 raise ValueError(f"Unsupported method {method}")
         except (requests.Timeout, requests.ConnectionError) as e:
@@ -144,6 +172,34 @@ class RestClient:
     def server_time(self) -> Dict:
         st, body, _ = self._request("GET", "/open/v1/common/time")
         return body
+
+    def sync_time(self) -> int:
+        """Align local clock to exchange; returns offset_ms (server - local)."""
+        local_before = int(time.time() * 1000)
+        body = self.server_time()
+        local_after = int(time.time() * 1000)
+        server_ms = None
+        if isinstance(body, dict):
+            data = body.get("data") if isinstance(body.get("data"), dict) else body
+            for k in ("serverTime", "timestamp", "time"):
+                if isinstance(data, dict) and data.get(k) is not None:
+                    try:
+                        server_ms = int(data[k])
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            if server_ms is None and body.get("timestamp") is not None:
+                try:
+                    server_ms = int(body["timestamp"])
+                except (TypeError, ValueError):
+                    pass
+        if server_ms is None:
+            logger.warning("sync_time: could not parse server time body=%s", list(body.keys()) if isinstance(body, dict) else type(body))
+            return self._time_offset_ms
+        local_mid = (local_before + local_after) // 2
+        self._time_offset_ms = server_ms - local_mid
+        logger.info("time sync offset_ms=%s", self._time_offset_ms)
+        return self._time_offset_ms
 
     def exchange_info(self) -> Dict:
         """Fetch tradeable symbols. Tries common Tokocrypto shapes."""
