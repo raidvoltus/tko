@@ -91,10 +91,6 @@ class Autopilot:
             max_stale_sec=float(risk_cfg.get("max_stale_market_sec", 45)),
         )
         self.journal = CycleJournal(self.control.audit_dir)
-        try:
-            self.load_persisted_credentials()
-        except Exception as e:
-            logger.warning("credential load: %s", type(e).__name__)
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -109,8 +105,16 @@ class Autopilot:
         self.model_valid = False
         self.logs: List[str] = []
 
+        # After logs/rest/tg ready — load secure credentials
+        try:
+            self.load_persisted_credentials()
+        except Exception as e:
+            logger.warning("credential load: %s", type(e).__name__)
+
     def _log(self, msg: str, level: str = "INFO") -> None:
         line = f"{time.strftime('%H:%M:%S')} [{level}] {msg}"
+        if not hasattr(self, "logs") or self.logs is None:
+            self.logs = []
         self.logs.append(line)
         if len(self.logs) > 150:
             self.logs = self.logs[-80:]
@@ -120,6 +124,10 @@ class Autopilot:
         from src.security.credentials import save_telegram_credentials, save_toko_credentials
         from src.security.redact import get_redactor
 
+        api_key = (api_key or "").strip()
+        api_secret = (api_secret or "").strip()
+        tg_token = (tg_token or "").strip()
+        tg_chat = str(tg_chat or "").strip()
         if api_key and api_secret:
             save_toko_credentials(api_key, api_secret)
             self.rest.api_key = api_key
@@ -140,9 +148,9 @@ class Autopilot:
 
         toko = load_toko_credentials()
         if toko.get("api_key") and toko.get("api_secret"):
-            self.rest.api_key = toko["api_key"]
-            self.rest.api_secret = toko["api_secret"]
-            get_redactor().register(toko["api_key"], toko["api_secret"])
+            self.rest.api_key = str(toko["api_key"]).strip()
+            self.rest.api_secret = str(toko["api_secret"]).strip()
+            get_redactor().register(self.rest.api_key, self.rest.api_secret)
             self._log("Loaded Tokocrypto credentials from secure store")
         else:
             self._log("No persisted Tokocrypto credentials", "WARN")
@@ -561,4 +569,82 @@ class Autopilot:
         if not rows:
             return [f"(no non-zero balances — status={st.status.value})"]
         return rows
+
+    def snapshot_for_gui(self) -> Dict[str, Any]:
+        """IPC-safe snapshot for GUI. Never raises; never fabricates balances."""
+        try:
+            c = self.last_cycle or {}
+            st = getattr(self, "account_state", None)
+            ad = st.to_dict() if st is not None else {}
+            usdt = (ad.get("assets") or {}).get("USDT") or {}
+            eq = ad.get("equity_usdt")
+            return {
+                "connection": "RUNNING" if getattr(self, "running", False) else "STOPPED",
+                "mode": "LIVE",
+                "bot_status": (
+                    "KILL" if getattr(self.risk, "kill_switch", False)
+                    else ("RUNNING" if getattr(self, "running", False) else "STOPPED")
+                ),
+                "account_state": ad.get("status", "UNRECONCILED"),
+                "balance": {
+                    "total": usdt.get("total") if usdt else (eq if eq is not None else "UNKNOWN"),
+                    "available": usdt.get("free") if usdt else "UNKNOWN",
+                    "locked": usdt.get("locked") if usdt else "UNKNOWN",
+                    "source": ad.get("source") or getattr(self, "balance_source", "EMPTY"),
+                    "equity_usdt": eq if eq is not None else "UNKNOWN",
+                    "unpriced": ad.get("unpriced_assets") or [],
+                },
+                "market": {"symbol": "MULTI", "last": "—", "bid": "—", "ask": "—", "status": "SCAN"},
+                "signal": {
+                    "signal": (c.get("signal") or {}).get("action", "WAIT"),
+                    "prob": (c.get("signal") or {}).get("probability", "—"),
+                    "model": "heuristic",
+                    "version": "v1",
+                    "model_status": "OK" if getattr(self, "model_valid", False) else "HEURISTIC",
+                    "last_pred": c.get("reason", "—"),
+                },
+                "positions": self._format_positions_for_gui(c),
+                "orders": [],
+                "risk": {
+                    "daily_pnl": getattr(self.risk, "daily_pnl", 0),
+                    "exposure": 0,
+                    "status": "KILL" if getattr(self.risk, "kill_switch", False) else "OK",
+                    "circuit": getattr(self.risk, "circuit_breaker", False),
+                    "kill": getattr(self.risk, "kill_switch", False),
+                    "account": ad.get("status"),
+                },
+                "system": {
+                    "rest": "OK",
+                    "ws": "—",
+                    "user_stream": "—",
+                    "clock_offset": "—",
+                    "rate": "—",
+                },
+                "telegram": {
+                    "status": getattr(self.tg, "last_status", "—"),
+                    "last": "—",
+                    "errors": getattr(self.tg, "last_error", None) or "—",
+                },
+                "logs": list(getattr(self, "logs", []) or [])[-12:],
+                "rotation": c.get("route"),
+                "cycle_id": c.get("cycle_id"),
+                "reconciliation": {
+                    "state": ad.get("status"),
+                    "source": ad.get("source"),
+                    "reconciled_at": ad.get("reconciled_at"),
+                    "errors": ad.get("errors") or [],
+                },
+            }
+        except Exception as e:
+            logger.exception("snapshot_for_gui failed")
+            return {
+                "connection": "ERROR",
+                "mode": "LIVE",
+                "bot_status": "ERROR",
+                "balance": {"total": "UNKNOWN", "available": "UNKNOWN", "locked": "UNKNOWN", "source": "ERROR"},
+                "positions": [f"snapshot error: {type(e).__name__}"],
+                "orders": [],
+                "risk": {"status": "ERROR"},
+                "logs": [str(type(e).__name__)],
+            }
 

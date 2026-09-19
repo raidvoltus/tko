@@ -39,6 +39,11 @@ def prepare_signed_params(
         v = p[k]
         if v is None:
             continue
+        # servers expect plain decimal strings, not scientific notation
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, float):
+            v = format(v, "f").rstrip("0").rstrip(".") if v == v else v
         items.append(f"{k}={v}")
     total_params = "&".join(items)
     signature = generate_signature(secret, total_params)

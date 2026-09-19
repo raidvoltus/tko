@@ -195,6 +195,10 @@ class CredentialStore:
 def save_toko_credentials(api_key: str, api_secret: str) -> None:
     from src.security.redact import get_redactor
 
+    api_key = (api_key or "").strip()
+    api_secret = (api_secret or "").strip()
+    if not api_key or not api_secret:
+        raise ValueError("empty credentials")
     get_redactor().register(api_key, api_secret)
     CredentialStore(NAMESPACE_TOKO).save({"api_key": api_key, "api_secret": api_secret})
 
