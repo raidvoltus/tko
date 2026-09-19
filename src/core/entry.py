@@ -48,6 +48,27 @@ def build_handler(auto):
         if cmd == "kill":
             auto.kill()
             return {"ok": True, "kill": True}
+        if cmd == "credential_status":
+            from src.security.credentials import NAMESPACE_TG, NAMESPACE_TOKO, CredentialStore
+            toko = CredentialStore(NAMESPACE_TOKO).validate()
+            tg = CredentialStore(NAMESPACE_TG).validate()
+            return {
+                "ok": True,
+                "toko": toko,
+                "telegram": tg,
+                "rest_key_present": bool(auto.rest.api_key),
+                "tg_status": getattr(auto.tg, "last_status", ""),
+            }
+        if cmd == "delete_credentials":
+            from src.security.credentials import NAMESPACE_TG, NAMESPACE_TOKO, CredentialStore
+            scope = str(req.get("scope", "all"))
+            if scope in ("all", "toko"):
+                CredentialStore(NAMESPACE_TOKO).delete()
+                auto.rest.api_key = ""
+                auto.rest.api_secret = ""
+            if scope in ("all", "telegram"):
+                CredentialStore(NAMESPACE_TG).delete()
+            return {"ok": True}
         if cmd == "configure":
             auto.configure_credentials(
                 str(req.get("api_key", "")),

@@ -185,7 +185,7 @@ class MainWindow:
         self._set_dash("\n".join(lines))
 
     def load_config_into_form(self, cfg: Dict) -> None:
-        self.api_key_var.set(cfg.get("api_key", ""))
+        self.api_key_var.set("********" if cfg.get("api_key_set") else "")
         # never show real secret; leave blank or masked indicator
         if cfg.get("api_secret"):
             self.api_secret_var.set("********")

@@ -91,6 +91,10 @@ class Autopilot:
             max_stale_sec=float(risk_cfg.get("max_stale_market_sec", 45)),
         )
         self.journal = CycleJournal(self.control.audit_dir)
+        try:
+            self.load_persisted_credentials()
+        except Exception as e:
+            logger.warning("credential load: %s", type(e).__name__)
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -113,15 +117,48 @@ class Autopilot:
         logger.log(getattr(logging, level, logging.INFO), msg)
 
     def configure_credentials(self, api_key: str, api_secret: str, tg_token: str = "", tg_chat: str = "") -> None:
-        self.rest.api_key = api_key
-        self.rest.api_secret = api_secret
+        from src.security.credentials import save_telegram_credentials, save_toko_credentials
+        from src.security.redact import get_redactor
+
+        if api_key and api_secret:
+            save_toko_credentials(api_key, api_secret)
+            self.rest.api_key = api_key
+            self.rest.api_secret = api_secret
+            get_redactor().register(api_key, api_secret)
+            self._log("Tokocrypto credentials saved to secure store")
         if tg_token and tg_chat:
+            save_telegram_credentials(tg_token, tg_chat)
             self.tg.configure(tg_token, tg_chat)
             self.tg.start()
+            get_redactor().register(tg_token)
+            self._log("Telegram credentials saved to secure store")
+
+    def load_persisted_credentials(self) -> None:
+        """Called at startup — no user re-entry required if store valid."""
+        from src.security.credentials import load_telegram_credentials, load_toko_credentials
+        from src.security.redact import get_redactor
+
+        toko = load_toko_credentials()
+        if toko.get("api_key") and toko.get("api_secret"):
+            self.rest.api_key = toko["api_key"]
+            self.rest.api_secret = toko["api_secret"]
+            get_redactor().register(toko["api_key"], toko["api_secret"])
+            self._log("Loaded Tokocrypto credentials from secure store")
+        else:
+            self._log("No persisted Tokocrypto credentials", "WARN")
+        tg = load_telegram_credentials()
+        if tg.get("bot_token") and tg.get("chat_id"):
+            self.tg.configure(tg["bot_token"], tg["chat_id"])
+            self.tg.start()
+            get_redactor().register(tg["bot_token"])
+            self._log("Loaded Telegram credentials from secure store")
 
     def start(self) -> None:
         if self.running:
             return
+        self.load_persisted_credentials()
+        if not (self.rest.api_key and self.rest.api_secret):
+            self._log("NO TRADE: credentials missing", "WARN")
         if self.control.is_kill_switch_active():
             self.risk.activate_kill_switch("file_flag")
             self._log("Kill switch flag present — not starting LIVE orders", "WARN")
