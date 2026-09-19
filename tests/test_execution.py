@@ -1,5 +1,7 @@
-"""Order lifecycle & PAPER mode tests - no live orders."""
+"""Order lifecycle — LIVE only; no paper fill path in production manager."""
 from decimal import Decimal
+
+import pytest
 
 from src.core.order_state import OrderState
 from src.execution.filters import SymbolFilters
@@ -14,8 +16,8 @@ def _make_mgr():
     risk.orderbook_synced = True
     risk.update_market_ts("BTC_USDT")
     risk.apply_authoritative_snapshot(equity=10_000.0, positions={}, daily_pnl=0.0)
-    rest = RestClient()  # no real keys
-    mgr = ExecutionManager(rest, risk, mode="PAPER")
+    rest = RestClient()  # no real keys — LIVE submit will fail network, not paper-fill
+    mgr = ExecutionManager(rest, risk, mode="LIVE")
     mgr.filters["BTC_USDT"] = SymbolFilters(
         symbol="BTC_USDT",
         qty_step=Decimal("0.001"),
@@ -27,20 +29,10 @@ def _make_mgr():
     return mgr
 
 
-def test_paper_order_fills():
+def test_rejects_non_live_mode():
     mgr = _make_mgr()
-    order = mgr.submit(
-        symbol="BTC_USDT",
-        side=0,
-        order_type=1,
-        quantity="0.01",
-        price="50000",
-        available_balance=1000,
-        reference_price=50000,
-    )
-    assert order.state == OrderState.FILLED
-    assert order.mode == "PAPER"
-    assert order.exchange_order_id is not None
+    with pytest.raises(ValueError):
+        mgr.set_mode("PAPER")
 
 
 def test_risk_blocks_order():
@@ -55,4 +47,20 @@ def test_risk_blocks_order():
         available_balance=1000,
     )
     assert order.state == OrderState.REJECTED
-    assert "KILL" in order.history[-1]["detail"] or "KILL" in str(order.history)
+    assert any("KILL" in str(h) for h in order.history) or "KILL" in str(order.history)
+
+
+def test_live_path_not_paper_fill():
+    """Without exchange keys, LIVE does not pretend FILLED."""
+    mgr = _make_mgr()
+    order = mgr.submit(
+        symbol="BTC_USDT",
+        side=0,
+        order_type=1,
+        quantity="0.01",
+        price="50000",
+        available_balance=1000,
+        reference_price=50000,
+    )
+    assert order.state != OrderState.FILLED
+    assert order.mode == "LIVE"

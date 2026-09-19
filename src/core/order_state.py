@@ -50,7 +50,7 @@ class Order:
     created_ts: float = field(default_factory=time.time)
     updated_ts: float = field(default_factory=time.time)
     history: List[Dict[str, Any]] = field(default_factory=list)
-    mode: str = "PAPER"  # PAPER / SHADOW / LIVE
+    mode: str = "LIVE"  # PAPER / SHADOW / LIVE
     raw_ack: Optional[Dict] = None
     raw_last: Optional[Dict] = None
 

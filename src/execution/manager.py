@@ -1,8 +1,6 @@
 """Order execution manager — Risk admit → normalize → LIVE RestClient only.
 
-Production path: LIVE only.
-PAPER/SHADOW remain non-production test harnesses (no exchange credentials path).
-They still require Risk ALLOW; they never bypass RiskEngine.
+Runtime mode: LIVE only. No PAPER/SHADOW/simulator execution path.
 """
 from __future__ import annotations
 
@@ -34,13 +32,12 @@ class ExecutionManager:
         self._paper_id_seq = 1000000
 
     def set_mode(self, mode: str) -> None:
-        m = mode.upper()
-        if m not in ("PAPER", "SHADOW", "LIVE"):
-            raise ValueError("mode must be PAPER/SHADOW/LIVE")
-        if m == "LIVE" and self.risk.kill_switch:
+        from src.execution.production_policy import require_live
+        m = require_live(mode)
+        if self.risk.kill_switch:
             raise RuntimeError("Cannot enable LIVE while kill switch is active")
         self.mode = m
-        logger.info("Execution mode set to %s (production=%s)", self.mode, is_production_trading_mode(m))
+        logger.info("Execution mode set to LIVE (production=True)")
 
     def submit(
         self,
@@ -117,19 +114,7 @@ class ExecutionManager:
 
         reservation_id = risk_status.reservation_id
 
-        # 3) Mode dispatch
-        if self.mode == "PAPER":
-            # Non-production test harness — risk already ALLOW
-            self.risk.commit_reservation(reservation_id)
-            return self._paper_fill(order)
-
-        if self.mode == "SHADOW":
-            # Non-production: log intent, no exchange
-            self.risk.commit_reservation(reservation_id)
-            order.transition(OrderState.REJECTED, "SHADOW_NO_EXCHANGE")
-            return order
-
-        # LIVE production — single RestClient path
+        # 3) LIVE only — single RestClient path
         if not is_production_trading_mode(self.mode):
             self.risk.release_reservation(reservation_id, safe=True)
             order.transition(OrderState.REJECTED, "NOT_LIVE")

@@ -51,8 +51,8 @@ class MainWindow:
         mode_frm = ttk.Frame(frm)
         mode_frm.grid(row=3, column=0, columnspan=4, sticky=tk.W)
         ttk.Label(mode_frm, text="Trading Mode:").pack(side=tk.LEFT)
-        self.mode_var = tk.StringVar(value="PAPER")
-        for m in ("PAPER", "SHADOW", "LIVE"):
+        self.mode_var = tk.StringVar(value="LIVE")
+        for m in ("LIVE",):
             ttk.Radiobutton(mode_frm, text=m, variable=self.mode_var, value=m).pack(side=tk.LEFT, padx=4)
 
         ctrl_row = ttk.Frame(frm)
@@ -67,7 +67,7 @@ class MainWindow:
         self.status_frame.pack(fill=tk.X, padx=6)
         self.lbl_conn = ttk.Label(self.status_frame, text="Connection: ● UNKNOWN", foreground="gray")
         self.lbl_conn.pack(side=tk.LEFT, padx=6)
-        self.lbl_mode = ttk.Label(self.status_frame, text="Mode: PAPER")
+        self.lbl_mode = ttk.Label(self.status_frame, text="Mode: LIVE")
         self.lbl_mode.pack(side=tk.LEFT, padx=6)
         self.lbl_bot = ttk.Label(self.status_frame, text="Bot: STOPPED")
         self.lbl_bot.pack(side=tk.LEFT, padx=6)
@@ -127,20 +127,24 @@ class MainWindow:
         conn = snapshot.get("connection", "UNKNOWN")
         color = "green" if conn == "ONLINE" else "red"
         self.lbl_conn.config(text=f"Connection: ● {conn}", foreground=color)
-        self.lbl_mode.config(text=f"Mode: {snapshot.get('mode', 'PAPER')}")
+        self.lbl_mode.config(text=f"Mode: {snapshot.get('mode', 'LIVE')}")
         self.lbl_bot.config(text=f"Bot: {snapshot.get('bot_status', 'STOPPED')}")
 
         lines.append(f"Connection: {conn}   Mode: {snapshot.get('mode')}   Bot: {snapshot.get('bot_status')}")
         lines.append("-" * 70)
-        lines.append("ACCOUNT")
+        lines.append("TOKOCRYPTO ACCOUNT")
+        recon = snapshot.get("reconciliation") or {}
         bal = snapshot.get("balance", {})
-        src = bal.get("source", "UNKNOWN")
+        lines.append(f"  ACCOUNT STATE : {snapshot.get('account_state', recon.get('state', '—'))}")
+        lines.append(f"  SOURCE        : {bal.get('source', recon.get('source', '—'))}")
         lines.append(
-            f"  Total: {bal.get('total', '—')}  Available: {bal.get('available', '—')}  "
-            f"Locked: {bal.get('locked', '—')}  Source: {src}"
+            f"  USDT free={bal.get('available', 'UNKNOWN')}  "
+            f"locked={bal.get('locked', 'UNKNOWN')}  total={bal.get('total', 'UNKNOWN')}"
         )
-        if src not in ("LIVE_REST",):
-            lines.append("  *** Not live exchange balance (PAPER/EMPTY/failed fetch) ***")
+        lines.append(f"  Equity USDT   : {bal.get('equity_usdt', 'UNKNOWN')}")
+        if bal.get("unpriced"):
+            lines.append(f"  Unpriced      : {bal.get('unpriced')}")
+        lines.append("  HOLDINGS:")
         lines.append("-" * 70)
         lines.append("MARKET")
         m = snapshot.get("market", {})
@@ -188,7 +192,7 @@ class MainWindow:
         if cfg.get("tg_token"):
             self.tg_token_var.set("********")
         self.tg_chat_var.set(cfg.get("tg_chat", ""))
-        self.mode_var.set(cfg.get("mode", "PAPER"))
+        self.mode_var.set(cfg.get("mode", "LIVE"))
 
     def run(self) -> None:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)

@@ -33,15 +33,15 @@ def build_handler(auto):
         if cmd == "snapshot":
             return {"ok": True, "data": auto.snapshot_for_gui()}
         if cmd == "start":
-            mode = str(req.get("mode", "PAPER")).upper()
-            if mode not in ("PAPER", "SHADOW", "LIVE"):
-                return {"ok": False, "error": "invalid_mode"}
+            mode = str(req.get("mode", "LIVE")).upper()
             try:
+                from src.execution.production_policy import require_live
+                mode = require_live(mode)
                 auto.exec_mgr.set_mode(mode)
             except Exception as e:
                 return {"ok": False, "error": str(e)}
             auto.start()
-            return {"ok": True, "running": True, "mode": mode}
+            return {"ok": True, "running": True, "mode": "LIVE"}
         if cmd == "stop":
             auto.stop()
             return {"ok": True, "running": False}

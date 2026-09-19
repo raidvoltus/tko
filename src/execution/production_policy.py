@@ -1,28 +1,23 @@
-"""
-Production execution policy.
+"""Production trading policy — LIVE only.
 
-Intelligence shadow (champion/challenger evaluation) is allowed.
-Fake fill / PAPER execution is NOT production trading authority.
-
-LIVE orders: RiskEngine → ExecutionManager → RestClient order API only.
+No PAPER/SHADOW/SIMULATION/DRY_RUN/DEMO as production execution modes.
 """
 from __future__ import annotations
 
-PRODUCTION_MODES = frozenset({"LIVE"})
-NON_PRODUCTION_MODES = frozenset({"PAPER", "SHADOW"})
+ALLOWED_MODES = frozenset({"LIVE"})
+REJECTED_MODES = frozenset({
+    "PAPER", "SHADOW", "SIMULATION", "DRY_RUN", "DEMO", "MOCK", "VIRTUAL", "TEST_EXECUTION",
+})
 
 
 def is_production_trading_mode(mode: str) -> bool:
     return str(mode).upper() == "LIVE"
 
 
-def assert_production_mode_or_raise(mode: str, allow_non_production: bool = False) -> None:
+def require_live(mode: str) -> str:
     m = str(mode).upper()
-    if m in PRODUCTION_MODES:
-        return
-    if allow_non_production and m in NON_PRODUCTION_MODES:
-        return
-    raise RuntimeError(
-        f"PRODUCTION_POLICY: mode={m} is not LIVE; "
-        "PAPER/SHADOW are non-production (tests/offline only)"
-    )
+    if m in REJECTED_MODES or m != "LIVE":
+        raise ValueError(
+            f"INVALID_CONFIGURATION: mode={m} rejected; only LIVE is allowed"
+        )
+    return "LIVE"

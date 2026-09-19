@@ -25,7 +25,7 @@ class AppController:
         self.config.load()
         self.risk = RiskEngine(RiskLimits())
         self.rest = RestClient()
-        self.exec_mgr = ExecutionManager(self.rest, self.risk, mode="PAPER")
+        self.exec_mgr = ExecutionManager(self.rest, self.risk, mode="LIVE")
         self.tg = TelegramNotifier()
         self.ml: Optional[SklearnModel] = None
         self.ws: Optional[MarketWebSocket] = None
@@ -60,7 +60,7 @@ class AppController:
         api_secret: str,
         tg_token: str,
         tg_chat: str,
-        mode: str = "PAPER",
+        mode: str = "LIVE",
     ) -> None:
         data = self.config.load()
         if api_key and not api_key.startswith("*"):
@@ -97,7 +97,7 @@ class AppController:
         self.tg.configure(data.get("tg_token", ""), data.get("tg_chat", ""))
         return self.tg.test_connection()
 
-    def start_bot(self, mode: str = "PAPER") -> None:
+    def start_bot(self, mode: str = "LIVE") -> None:
         if self.bot_running:
             return
         data = self.config.load()

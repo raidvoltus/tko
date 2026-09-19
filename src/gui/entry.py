@@ -57,7 +57,7 @@ class GuiIpcBridge:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def save_config(self, api_key, api_secret, tg_token, tg_chat, mode="PAPER"):
+    def save_config(self, api_key, api_secret, tg_token, tg_chat, mode="LIVE"):
         r = self._req(
             cmd="configure",
             api_key=api_key if not str(api_key).startswith("*") else "",
@@ -75,7 +75,7 @@ class GuiIpcBridge:
         r = self._req(cmd="test_telegram")
         return bool(r.get("ok"))
 
-    def start_bot(self, mode="PAPER"):
+    def start_bot(self, mode="LIVE"):
         return self._req(cmd="start", mode=mode)
 
     def stop_bot(self):

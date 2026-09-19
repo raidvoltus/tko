@@ -1,7 +1,7 @@
 # Tokocrypto Full Autopilot - Control Plane Config
 # Target: HP 430 G1 / i3 / 8GB / Windows 10+ / CPU-only
 
-mode: PAPER  # PAPER | SHADOW | LIVE
+mode: LIVE  # LIVE only
 cycle_interval_sec: 30
 
 hardware:
@@ -79,7 +79,7 @@ paths:
 # Simulated wallet for PAPER/SHADOW only. 0 = show empty (never invent 100 USDT).
 # Real exchange balances appear only after LIVE credentials + successful account REST.
 paper:
-  wallet_usdt: 0
+  wallet_usdt: 0  # ignored — LIVE only, no paper balances
 
 symbols:
   whitelist: []

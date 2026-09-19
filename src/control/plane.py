@@ -47,12 +47,12 @@ class ControlPlane:
         from src.utils.paths import ensure_default_config, resolve_config_path, state_root
 
         data = state_root()
-        self.state_dir = data / "state"
-        self.audit_dir = data / "audit"
         # Prefer explicit root only if its config exists; else frozen-aware ProgramData/install
         if root is not None and (Path(root) / "config" / "config.yaml").is_file():
             self.root = Path(root)
             self.config_path = self.root / "config" / "config.yaml"
+            self.state_dir = self.root / "state"
+            self.audit_dir = self.root / "audit"
         else:
             if root is not None:
                 logger.warning(
@@ -61,6 +61,8 @@ class ControlPlane:
                 )
             self.root = data
             self.config_path = ensure_default_config(resolve_config_path())
+            self.state_dir = data / "state"
+            self.audit_dir = data / "audit"
         self.kill_path = self.state_dir / "kill_switch.flag"
         self.registry_path = self.state_dir / "model_registry.json"
         self.flags_path = self.state_dir / "feature_flags.json"
@@ -89,10 +91,11 @@ class ControlPlane:
             self.config = {}
             return self.config
         self.config = yaml.safe_load(raw) or {}
-        mode = str(self.config.get("mode", "PAPER")).upper()
-        if mode not in ("PAPER", "SHADOW", "LIVE"):
-            raise ValueError(f"invalid mode: {mode}")
-        self.config["mode"] = mode
+        mode = str(self.config.get("mode", "LIVE")).upper()
+        from src.execution.production_policy import REJECTED_MODES
+        if mode != "LIVE" or mode in REJECTED_MODES:
+            raise ValueError(f"INVALID_CONFIGURATION: mode={mode} — only LIVE allowed")
+        self.config["mode"] = "LIVE"
         logger.info("Config loaded hash=%s mode=%s", self.config_hash[:12], mode)
         return self.config
 

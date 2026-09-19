@@ -13,6 +13,7 @@ from src.decision.plane import DecisionPlane
 from src.execution.manager import ExecutionManager
 from src.features.engine import CandleBuffer, FeatureEngine
 from src.observability.cycle import CycleJournal, DataQualityGate
+from src.portfolio.account_state import AccountReconciler, AccountStatus
 from src.portfolio.rotation import (
     AssetScanner,
     OpportunityScorer,
@@ -37,7 +38,7 @@ class Autopilot:
             self.cfg = self.control.load_config()
         except Exception as e:
             logger.error("Config load failed: %s — using safe defaults", e)
-            self.cfg = {"mode": "PAPER", "cycle_interval_sec": 30}
+            self.cfg = {"mode": "LIVE", "cycle_interval_sec": 30}
 
         risk_cfg = self.cfg.get("risk") or {}
         self.risk = RiskEngine(
@@ -52,7 +53,13 @@ class Autopilot:
             )
         )
         self.rest = RestClient()
-        mode = str(self.cfg.get("mode", "PAPER")).upper()
+        from src.execution.production_policy import require_live
+        try:
+            mode = require_live(str(self.cfg.get("mode", "LIVE")))
+        except ValueError as e:
+            logger.error("%s — NO TRADE", e)
+            mode = "LIVE"
+            self.cfg["mode"] = "LIVE"
         self.exec_mgr = ExecutionManager(self.rest, self.risk, mode=mode)
         self.tg = TelegramNotifier()
 
@@ -92,7 +99,9 @@ class Autopilot:
         self.symbols_cache: List[Dict[str, Any]] = []
         self.prices: Dict[str, float] = {}
         self.balances: Dict[str, Dict[str, float]] = {}
-        self.balance_source: str = "EMPTY"  # EMPTY | LIVE_REST | PAPER_WALLET | FETCH_FAILED
+        self.balance_source: str = "EMPTY"
+        self.account_recon = AccountReconciler()
+        self.account_state = self.account_recon.state
         self.model_valid = False
         self.logs: List[str] = []
 
@@ -250,29 +259,52 @@ class Autopilot:
                 ]
                 self.rotation.router.set_pairs(self.symbols_cache)
 
-        # 2) balances (REST signed) — only when API credentials present
+        # 2) FULL account reconciliation (authoritative)
         if not (self.rest.api_key and self.rest.api_secret):
-            if self.balance_source != "PAPER_WALLET":
-                self.balance_source = "NO_CREDENTIALS"
+            self.balance_source = "NO_CREDENTIALS"
+            self.account_state = self.account_recon.mark_failed("NO_CREDENTIALS")
         else:
             try:
                 st, body = self.rest.account()
-                bals = self._extract_balances(body if isinstance(body, dict) else {})
-                if bals is None:
+                body = body if isinstance(body, dict) else {}
+                # reject non-success API codes when present
+                code = body.get("code")
+                if code is not None and str(code) not in ("0", "200", ""):
+                    self.account_state = self.account_recon.mark_failed(f"api_code={code}")
                     self.balance_source = "FETCH_FAILED"
-                    self._log(
-                        f"account parse failed st={st} keys={list(body.keys())[:8] if isinstance(body, dict) else type(body)}",
-                        "WARN",
-                    )
+                    self._log(f"account API code={code} msg={body.get('msg')}", "WARN")
                 else:
-                    self.balances = bals
-                    self.balance_source = "LIVE_REST"
-                    self._log(f"account sync LIVE_REST n={len(bals)} assets={list(bals.keys())[:12]}")
+                    self.account_state = self.account_recon.apply_rest_snapshot(body)
+                    # mirror into legacy balances dict for rotation (free/locked floats)
+                    self.balances = {}
+                    for a, bal in self.account_state.assets.items():
+                        if bal.total > 0:
+                            self.balances[a] = {
+                                "free": float(bal.free),
+                                "locked": float(bal.locked),
+                            }
+                    self.balance_source = (
+                        "LIVE_REST" if self.account_state.status == AccountStatus.VALID else self.account_state.status.value
+                    )
+                    self._log(
+                        f"account recon status={self.account_state.status.value} "
+                        f"n={len(self.account_state.assets)} holdings={len(self.account_state.holdings())} "
+                        f"errors={self.account_state.errors[:3]}"
+                    )
+                    # push to risk
+                    try:
+                        usdt = self.account_state.assets.get("USDT")
+                        avail = float(usdt.free) if usdt else 0.0
+                        pos = {a: float(b.total) for a, b in self.account_state.assets.items() if b.total > 0}
+                        self.risk.apply_authoritative_snapshot(avail, pos, daily_pnl=float(self.risk.daily_pnl or 0))
+                    except Exception as e:
+                        self._log(f"risk snapshot apply failed: {e}", "WARN")
             except Exception as e:
                 self._log(f"account fetch failed: {e}", "WARN")
                 self.balance_source = "FETCH_FAILED"
+                self.account_state = self.account_recon.mark_failed(str(e))
 
-        # 3) prices for held assets + targets (needed for value_usdt filter)
+        # 3) prices for valuation (no fabricated zeros for unknown)
         for asset in list(self.balances.keys()) + ["BTC", "ETH", "USDT"]:
             asset_u = str(asset).upper()
             if asset_u in ("USDT", "USDC", "BUSD", "USD"):
@@ -287,8 +319,9 @@ class Autopilot:
                     self.prices[asset_u] = px
             except Exception:
                 pass
+        self.account_recon.apply_valuations(self.prices)
 
-        # seed synthetic candles for feature engine if empty (PAPER / offline)
+# seed synthetic candles for feature engine if empty (PAPER / offline)
         for sym_info in self.symbols_cache[:5]:
             sym = sym_info["symbol"]
             if self.candles.len(sym) < 30:
@@ -326,15 +359,8 @@ class Autopilot:
             expected[asset] = 0.4 * float(expected.get(asset, 0.0)) + 0.6 * self.decision.strategies.expected_return_pct(sc)
 
         # 5) portfolio snapshot + rotation plan
-        # Never invent exchange balances. Optional PAPER wallet only if config sets paper_wallet_usdt.
+        # Never invent exchange balances
         bal_for_snap = dict(self.balances)
-        if not bal_for_snap and self.exec_mgr.mode in ("PAPER", "SHADOW"):
-            paper_usdt = float((self.cfg.get("paper") or {}).get("wallet_usdt", 0) or 0)
-            if paper_usdt > 0:
-                bal_for_snap = {"USDT": {"free": paper_usdt, "locked": 0.0}}
-                self.balance_source = "PAPER_WALLET"
-            else:
-                self.balance_source = self.balance_source if self.balance_source == "FETCH_FAILED" else "EMPTY"
         snap = self.rotation.build_snapshot(bal_for_snap, self.prices)
         plan = self.rotation.plan_cycle(snap, expected, symbols=self.symbols_cache)
 
@@ -377,7 +403,9 @@ class Autopilot:
             and signal.action in ("BUY", "SELL")
             and not self.risk.kill_switch
         ):
-            if self.exec_mgr.mode == "LIVE" and not self.model_valid and (self.cfg.get("ml") or {}).get("require_for_live", True):
+            if self.account_state.status != AccountStatus.VALID:
+                self._log(f"LIVE blocked: account_state={self.account_state.status.value}", "WARN")
+            elif self.exec_mgr.mode == "LIVE" and not self.model_valid and (self.cfg.get("ml") or {}).get("require_for_live", True):
                 self._log("LIVE blocked: model invalid", "WARN")
             else:
                 side = 0 if signal.action == "BUY" else 1
@@ -483,57 +511,17 @@ class Autopilot:
 
 
     def _format_positions_for_gui(self, c: Dict[str, Any]) -> list:
-        """Human-readable positions for GUI; never invent balances."""
-        ps = c.get("portfolio_snapshot") or {}
-        src = ps.get("balance_source") or getattr(self, "balance_source", "EMPTY")
-        assets = ps.get("assets") or {}
-        if not assets:
-            return [f"(no balances — source={src})"]
-        rows = [f"{a}: {float(v):.4f} USDT" for a, v in assets.items()]
-        if src != "LIVE_REST":
-            rows.insert(0, f"[NOT exchange balance: {src}]")
+        """Authoritative holdings for GUI."""
+        st = getattr(self, "account_state", None)
+        if st is None:
+            return ["(account UNRECONCILED)"]
+        if st.status.value in ("UNRECONCILED", "UNKNOWN", "INVALID", "RECONCILING"):
+            return [f"(account {st.status.value} — not showing fabricated zeros)"]
+        rows = []
+        for a in st.holdings():
+            vu = f"{a.valuation_usdt}" if a.valuation_usdt is not None else "VALUATION UNKNOWN"
+            rows.append(f"{a.asset}: free={a.free} locked={a.locked} total={a.total} (~{vu} USDT)")
+        if not rows:
+            return [f"(no non-zero balances — status={st.status.value})"]
         return rows
 
-    def snapshot_for_gui(self) -> Dict[str, Any]:
-        c = self.last_cycle or {}
-        return {
-            "connection": "RUNNING" if self.running else "STOPPED",
-            "mode": self.exec_mgr.mode,
-            "bot_status": "KILL" if self.risk.kill_switch else ("RUNNING" if self.running else "STOPPED"),
-            "balance": {
-                "total": f"{(c.get('portfolio_snapshot') or {}).get('total_value_usdt', 0):.2f}",
-                "available": f"{(c.get('portfolio_snapshot') or {}).get('available_usdt', 0):.2f}",
-                "locked": "—",
-                "source": (c.get("portfolio_snapshot") or {}).get("balance_source")
-                or getattr(self, "balance_source", "EMPTY"),
-            },
-            "market": {"symbol": "MULTI", "last": "—", "bid": "—", "ask": "—", "status": "SCAN"},
-            "signal": {
-                "signal": (c.get("signal") or {}).get("action", "WAIT"),
-                "prob": (c.get("signal") or {}).get("probability", "—"),
-                "model": "heuristic",
-                "version": "v1",
-                "model_status": "OK" if self.model_valid else "HEURISTIC",
-                "last_pred": c.get("reason", "—"),
-            },
-            "positions": self._format_positions_for_gui(c),
-            "orders": [],
-            "risk": {
-                "daily_pnl": self.risk.daily_pnl,
-                "exposure": 0,
-                "status": "KILL" if self.risk.kill_switch else "OK",
-                "circuit": self.risk.circuit_breaker,
-                "kill": self.risk.kill_switch,
-            },
-            "system": {
-                "rest": "OK",
-                "ws": "—",
-                "user_stream": "—",
-                "clock_offset": "—",
-                "rate": "—",
-            },
-            "telegram": {"status": self.tg.last_status, "last": "—", "errors": self.tg.last_error or "—"},
-            "logs": self.logs[-12:],
-            "rotation": c.get("route"),
-            "cycle_id": c.get("cycle_id"),
-        }
