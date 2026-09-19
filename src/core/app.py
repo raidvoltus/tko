@@ -46,7 +46,8 @@ class AppController:
         logger.log(getattr(logging, level, logging.INFO), msg)
 
     def _load_ml(self) -> None:
-        model_dir = Path(__file__).resolve().parents[2] / "models" / "default"
+        from src.utils.paths import install_dir
+        model_dir = install_dir() / "models" / "default"
         self.ml = SklearnModel()
         if model_dir.exists():
             ok = self.ml.load(str(model_dir))

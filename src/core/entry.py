@@ -9,9 +9,12 @@ from typing import Any, Dict
 
 # Bootstrap sys.path before importing src.* (dev mode)
 if not getattr(sys, "frozen", False):
-    _dev_root = Path(__file__).resolve().parents[2]
-    if str(_dev_root) not in sys.path:
-        sys.path.insert(0, str(_dev_root))
+    try:
+        _dev_root = Path(__file__).resolve().parents[2]
+        if str(_dev_root) not in sys.path:
+            sys.path.insert(0, str(_dev_root))
+    except IndexError:
+        pass
 
 from src.utils.paths import install_dir, is_frozen  # noqa: E402
 

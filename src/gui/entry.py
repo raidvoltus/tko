@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import logging
 import sys
-from pathlib import Path
 from typing import Any, Dict
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# Bootstrap sys.path only in dev (not frozen PyInstaller)
+if not getattr(sys, "frozen", False):
+    from pathlib import Path
+
+    try:
+        _dev_root = Path(__file__).resolve().parents[2]
+        if str(_dev_root) not in sys.path:
+            sys.path.insert(0, str(_dev_root))
+    except (IndexError, AttributeError):
+        pass
 
 logging.basicConfig(
     level=logging.INFO,

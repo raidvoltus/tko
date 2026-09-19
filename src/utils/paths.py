@@ -40,7 +40,10 @@ def meipass() -> Optional[Path]:
 def install_dir() -> Path:
     if is_frozen():
         return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parents[2]
+    try:
+        return Path(__file__).resolve().parents[2]
+    except IndexError:
+        return Path(__file__).resolve().parent
 
 
 def program_data_dir() -> Path:
